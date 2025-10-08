@@ -1,0 +1,152 @@
+```{r}
+# only run this code if repeating is FALSE
+orig_eval <- knitr::opts_chunk$get("eval")
+knitr::opts_chunk$set(eval = ifelse(repeating, FALSE, TRUE))
+```
+
+## Load & Prepare Data
+
+```{r, fine-data-prep}
+fine_data <- hhmm_data |>
+  filter(level == '2')
+
+coarse_model <- readRDS("../data/fitted-models/coarse-only/sel_coarse.RDS")
+
+coarse_states0 <- coarse_model$data |> 
+  select(whale_ID, dive_cycle_num) |>
+  mutate(response_state = momentuHMM::viterbi(coarse_model))
+
+fine_data <- left_join(fine_data, 
+                       coarse_states0, 
+                       by = c('whale_ID', 'dive_cycle_num')) |>
+  mutate(response_state = ifelse(response_state == 2, 1, 0)) |>
+  data.frame()
+
+# pull(coarse_states, state) will give the 0 if baseline, 1 if response @ coarse 
+```
+
+```{r, prep-fine-hmm-data}
+fine_data <- fine_data  |>
+  prepData(coordNames = NULL,
+           covNames = c('fine_mfa_bb_rms_max_scale',
+                        'fine_mfa_csel_scale',
+                        'response_state'))
+```
+
+## Starting Parameter Values
+
+```{r, fine-start-vals}
+# defining starting values
+msa.mu0 = c(0.66, 3.2, 1, 0.42)
+msa.sigma0 = c(0.22,1.2,0.34, 0.29)
+
+stroke.shape0 = c(1.8, 2, 4, 0.5)
+stroke.scale0 = c(0.5, 0.5, 0.4, 0.4)
+stroke.zeromass0 = c(2e-11,0.003, 1e-13, 0.1)
+
+ck.prob0 = c(0.9, 0.3, 0.01, 0.01)
+
+head.mu0 = c(2, 2, 1, 0.1)
+head.sigma0 = c(0.5, 0.5, 0.5, 0.1)
+
+```
+
+```{r, construct-par0}
+Par00 <- list(
+  pct90_msa = c(msa.mu0, msa.sigma0),
+  strokes_per_sec = c(stroke.shape0, stroke.scale0, stroke.zeromass0),
+  clicks_present = c(ck.prob0),
+  std_head = c(head.mu0, head.sigma0))
+```
+
+# Model Structure & Metadata
+
+```{r}
+state_dep_dists <- list(
+  "pct90_msa" = "gamma",
+  "strokes_per_sec" = "weibull",
+  "clicks_present" ="bern",
+  "std_head" = "gamma"
+)
+```
+
+```{r rl-model-list}
+rl_model_meta <- data.frame(model_name = 
+                              c('response_state_only',
+                                'rl_fine',
+                                'sel_fine'
+                                ),
+                            fine_formula = c("~response_state",
+                                             "~response_state + fine_mfa_bb_rms_max_scale",
+                                             "~response_state + fine_mfa_csel_scale"
+                                             )
+                            )
+
+rl_model_meta <- rl_model_meta |>
+  mutate(model_file = paste0("../data/refitted-models/fine-only/", model_name, ".RDS")) |>
+  as.data.frame()
+
+```
+
+## Model Fitting
+
+```{r, fit-fine-models}
+n_fit_cycles <- 10
+fitted_models <- list()
+for (c in c(1:n_fit_cycles)){
+  these_fitted_models <- list()
+  for(rep in c(1:2)){
+    for (m in c(1:nrow(rl_model_meta))){
+      message(paste('Round', c, 'of', n_fit_cycles, 
+                    '- Fitting model', m, 'of', nrow(rl_model_meta), 
+                    '. Model name:', rl_model_meta[m, "model_name"]))
+      
+      if (m == 1 & rep == 1){
+        Par0 <- Par00
+        beta0 <- NULL
+        delta0 <- NULL
+      }else{
+        Par0 <- getPar0(these_fitted_models[[which.max(unlist(lapply(these_fitted_models, getLL)))]],
+                        formula = as.formula(rl_model_meta[m, "fine_formula"]))
+        if (any(Par0$Par$clicks_present == 1)){
+          Par0$Par$clicks_present[Par0$Par$clicks_present == 1] <- 0.99
+        }
+        beta0 <- Par0$beta
+        delta0 <- Par0$delta
+        Par0 <- Par0$Par
+      }
+      
+      # fit model
+      this_file <- rl_model_meta[m, 'model_file']
+      this_fit <- try(suppressWarnings(fitHMM(fine_data,
+                             nbStates = 4,
+                             dist = state_dep_dists,
+                             formula = as.formula(rl_model_meta[m, "fine_formula"]),
+                             Par0 = Par0,
+                             beta0 = beta0,
+                             delta0 = delta0,
+                             optMethod = "nlm",
+                             retryFits = 100,
+                             retrySD = ifelse(rep == 1, 250, 10)
+      )),
+      silent = TRUE
+      )
+      if ("momentuHMM" %in% class(this_fit)){
+        these_fitted_models[[m]] <- this_fit
+        if (c == 1){ 
+          fitted_models[[m]] <- these_fitted_models[[m]]
+          saveRDS(fitted_models[[m]], this_file)
+        }
+        if (c > 1 & getLL(these_fitted_models[[m]]) > getLL(fitted_models[[m]])){
+          fitted_models[[m]] <- these_fitted_models[[m]]
+          saveRDS(fitted_models[[m]], this_file)  
+        } # end of "if new fit is better"
+      } # end of "if new fit succeeded"
+    } # end of "fit mth model"
+  } # end of loop over models
+} # end fitting cycles
+```
+
+```{r}
+knitr::opts_chunk$set(eval = orig_eval)
+```

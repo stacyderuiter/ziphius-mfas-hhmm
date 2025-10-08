@@ -1,0 +1,287 @@
+<!-- this document has no YAML header of its own and no setup chunk because it is incorporated into the supplemental files by "include" as a "child" document -->
+
+
+```{r}
+#| label: functions
+
+source('../utils/getLL.R')
+source("../utils/w2n.R")
+source("../utils/formatRecharge.R") 
+source("../utils/stateFormulas.R")
+source("../utils/momentuHMM_utils.R")
+source("../utils/RcppExports.R")
+```
+
+```{r, full-models}
+data_path <- "../data"
+model_path <- file.path(data_path,
+                        'fitted-models')
+
+model_meta <- 
+  data.frame(model_name = dir(model_path, 
+                              pattern = "*.RDS"))
+            
+model_meta <- model_meta |>
+  mutate(model_file = file.path(
+    model_path,
+    paste0(model_name))) |>
+  as.data.frame()
+
+fitted_models <- list()
+for (m in c(1:nrow(model_meta))){
+  if (file.exists(model_meta[m, 'model_file'])){
+    fitted_models[[m]] <- readRDS(model_meta[m, 'model_file'])
+  # }else{
+    # fitted_models[[m]] <- NULL
+  }
+}
+
+model_meta <- model_meta |>
+  mutate(model = c(1:n()),
+         model_name = str_remove_all(model_name, pattern = fixed(".RDS")),
+         full_formula = NA)
+
+names(fitted_models) <- model_meta[,'model_name']
+
+for (m in c(1:nrow(model_meta))){
+  # note that the model formulas don't include state-specificity of fine-scale MFAS effects
+  # but they *are* only in coarse state 2.
+  model_meta$full_formula[m] <- as.character(fitted_models[[m]]$conditions$formula)[2]
+}
+
+model_meta <- model_meta |>
+  separate_wider_delim(full_formula, delim = "I((level == \"2i\") * 1)",
+                       names = c("coarse_formula", "fine_formula"),
+                       cols_remove = FALSE) |>
+  mutate(coarse_formula = str_remove_all(coarse_formula, 
+                                         pattern = fixed("I((level == \"1\") * ")) |>
+           str_squish(),
+         coarse_formula = str_remove_all(coarse_formula, fixed(")")),
+         fine_formula = str_remove_all(fine_formula, fixed('+ I((level == "2") * 1)')),
+         fine_formula = if_else(is.na(fine_formula), " ", fine_formula))
+```
+
+
+```{r}
+#| label: model-comparison
+
+AICs <- sapply(fitted_models[unlist(lapply(fitted_models, function(x) !is.null(x)))], AIC) 
+
+model_meta <- model_meta |>
+  mutate(AIC = as.numeric(AICs[model_meta$model_name]),
+         LogLik = as.numeric(lapply(fitted_models, getLL)[model_meta$model_name])) |>
+  mutate(minAIC = min(AIC, na.rm = TRUE)) |>
+  mutate(dAIC = AIC - minAIC) |>
+  arrange(dAIC) 
+```
+
+```{r}
+best_model_name <- model_meta$model_name[which.min(model_meta$AIC)]
+best_model <- fitted_models[[best_model_name]]
+data <- best_model$data
+```
+
+
+```{r}
+#| label: state-decoding
+
+data <- data |>
+  mutate(viterbi = viterbi(best_model)) |>
+  mutate(state  = factor(viterbi, levels = paste(c(1:8))),
+         coarse_state = if_else(state %in% c("1", "2", "3", "4"),
+                                "Typical", "Variant"),
+         state4 = fct_collapse(state, 
+                               "1" = c("1", "5"),
+                               "2" = c("2", "6"),
+                               "3" = c("3", "7"),
+                               "4" = c("4", "8")),
+         mfas_rl = ifelse(fine_mfa_bb_rms_max_67 == 0, NA, fine_mfa_bb_rms_max_67),
+         fine_impulse_presence = if_else(fine_impulsive_n_pings > 0, 1, 0),
+         fine_echo_presence = if_else(fine_echosounder_n_pings > 0, 1, 0))
+```
+
+```{r}
+#| label: dive-cycle-level-dataset
+
+L1_data <- data |> 
+  filter(level == "1")  |>
+  mutate(across(where(is.numeric), function(x) round(x, digits= 1))) |>
+  select(whale_ID, start_time_UTC, coarse_state,
+         sonar_before_eoc,
+         mfa_bb_rms_max_67, mfa_csel,
+         echo_presence, impulsive_presence, orca_presence,
+         dur_hours, fd_dur_hours, nshal,
+         longest_nf_dur_hours, surf_hours, click_dur_mins,
+         max_depth_km, step) 
+```
+
+```{r, data-variant-dur}
+viterbi_best <- data |>
+  filter(level == "1") |>
+  pull(viterbi)
+
+resp_dur <- data |> 
+  filter(level == 1) |> 
+  mutate(state_diff = ifelse(dive_cycle_num == 1, 
+                              NA,
+                              viterbi_best - lag(viterbi_best, n = 1)))
+
+resp_start_ix <- which(resp_dur$state_diff == 4)
+resp_dur$variant_num <- NA
+resp_dur$variant_num[resp_start_ix] <- c(1:length(resp_start_ix))
+
+resp_dur <- resp_dur |>
+  group_by(whale_ID) |>
+  fill(variant_num, .direction = 'down') |>
+  ungroup() |>
+  mutate(variant_num = ifelse(viterbi_best == 1, NA, variant_num))
+
+variant_summary <- resp_dur |>
+  # for final dives in record, if dur of dc isn't known, we know the dc dur is >= fd dur
+  mutate(dur_hours = 
+           if_else(is.na(dur_hours & !is.na(fd_dur_hours)),
+                   fd_dur_hours,
+                   dur_hours)) |>
+  drop_na(variant_num) |>
+  group_by(whale_ID, variant_num) |>
+  summarise(n_dives = n(),
+            total_dur = sum(dur_hours, na.rm = TRUE), # b/c of na.rm, will be truncated dur
+            type = "Observed",
+            initial_csel = first(mfa_csel),
+            bout_start_time_UTC = first(start_time_UTC),
+            .groups = "drop") |>
+  ungroup()
+```
+
+```{r}
+my_pars <- getPar(best_model)
+
+cov_values <- data.frame(sonar_before_eoc = 0,
+                         mfa_csel_scale = 0,
+                         fine_mfa_bb_rms_max_scale = 66)
+
+mfas_par_cis <- CIreal(best_model, covs = cov_values)
+l1_tpm <- mfas_par_cis$hierGamma$level1$gamma
+dc_dur_params <- data.frame(state = c(1, 2),
+                            mean = c(mfas_par_cis$dur_hours$est["mean","b1"],
+                                     mfas_par_cis$dur_hours$est["mean","e1"]),
+                            mean_sd = c(mfas_par_cis$dur_hours$se["mean","b1"],
+                                        mfas_par_cis$dur_hours$se["mean","e1"]),
+                            sd = c(mfas_par_cis$dur_hours$est["sd", "b1"],
+                                   mfas_par_cis$dur_hours$est["sd", "e1"]),
+                            sd_sd = c(mfas_par_cis$dur_hours$se["sd", "b1"],
+                                      mfas_par_cis$dur_hours$se["sd", "e1"])
+                            )
+```
+
+
+```{r}
+set.seed(15)
+nwhales <- 1000
+sim_tags <- list()
+nbStates <- 8
+workBounds <- NULL
+formula <- best_model$conditions$formula
+mixtures <- best_model$conditions$mixtures
+betaRef <- best_model$conditions$betaRef
+reForm <- formatRecharge(nbStates,formula,betaRef,best_model$data, par=best_model$mle)
+covs <- reForm$covs
+
+Sigma <- best_model$mod$Sigma  
+# nbCovs <- ncol(covs) - 1
+betaCons <- best_model$conditions$betaCons
+tpm_ind <- min(which(best_model$data$level == "1" & best_model$data$mfa_csel_scale == 0))
+
+# which indices of the best_model$mod$estimate vector are TPM params?
+gamInd <- c(57 : (57 + length(best_model$mle$beta) - 1))
+
+           
+# draw ALL the parameters
+# each row is a set of the unique TPM parameter draws on working scale
+sim_pars <- rmvnorm(n = nwhales,
+                    mean = best_model$mod$estimate,
+                    sigma = best_model$mod$Sigma
+                    )
+
+dur_pars <- sim_pars[,c(1:4)]
+sim_pars <- sim_pars[,gamInd[unique(c(betaCons))]]
+
+estimate_labels <- data.frame(stream_name = rep("dur_hours", 4),
+                              par_name = c(rep("mean", 2), rep("sd", 2)),
+                              state = rep.int(c("Typical", "Variant"), 2),
+                              w2nat = rep.int("exp", 4))
+
+for (w in c(1:nwhales)){
+  # vector with space for TPM parameters - size of beta
+  tmp_this_beta <- rep(NA, length(betaCons))
+  # fill in the not-constrained values with the MVN parameter draws
+  tmp_this_beta[unique(c(betaCons))] <- sim_pars[w,]
+  # form into matrix with size/shape of beta. on working scale.
+  this_beta <- w2wn(matrix(tmp_this_beta[c(betaCons)], nrow(betaCons), ncol(betaCons)), workBounds)
+  # convert to natural scale and with all rows/cols including reference states
+  this_gamma <- trMatrix_rcpp(nbStates,
+                              this_beta[1:ncol(covs),,drop=FALSE],
+                              covs,
+                              betaRef)[,,tpm_ind]
+  this_gamma <- this_gamma[c(1,5), c(1,5)]
+  
+  these_pars <- estimate_labels
+  these_pars$wpar <- dur_pars[w,]
+  these_pars$npar <- NA
+  these_pars[these_pars$w2nat == "exp", "npar"] <- 
+    exp(these_pars$wpar[these_pars$w2nat == "exp"])
+  vmean <- these_pars[these_pars$state == "Variant" & these_pars$par_name == "mean", "npar"]
+  vsd <- these_pars[these_pars$state == "Variant" & these_pars$par_name == "sd", "npar"]
+  vshape = vmean^2 / (vsd ^ 2)
+  vrate = vmean / (vsd ^ 2)
+  this_sim <- data.frame(whale_id = w,
+                           state = 2,
+                           dc_dur = rgamma(1, shape = vshape, rate = vrate))
+  while(nrow(this_sim) == 1 || tail(this_sim, n = 1)$state == 2){
+      current_state <- tail(this_sim, n = 1)$state
+      nextrow <- data.frame(whale_id = w,
+                            state = ifelse(rbinom(n = 1, size = 1, 
+                                                  prob = this_gamma[2,2]),
+                                           current_state,
+                                           1),
+                            dc_dur = rgamma(1, shape = vshape, rate = vrate))
+      this_sim <- bind_rows(this_sim, nextrow)
+    }
+    sim_tags[[w]] <- this_sim |> filter(state == 2)
+}
+
+sim_tags <- bind_rows(sim_tags)
+
+```
+
+
+
+```{r}
+sim_responses <- sim_tags |>
+  group_by(whale_id) |>
+  summarise(response_dur_dives = n(),
+            response_dur_hours = sum(dc_dur))
+```
+
+```{r, response-duration-df}
+variant_dur <- bind_rows(
+  variant_summary |> 
+    mutate(variant_num = as.character(variant_num)) |>
+    rename(ID = variant_num),
+  sim_responses |>
+    rename(ID = whale_id,
+           n_dives = response_dur_dives,
+           total_dur = response_dur_hours) |>
+    mutate(type = "Simulated",
+           ID = paste0("sim", ID))
+) |>
+  pivot_longer(cols = c(n_dives, total_dur),
+               names_to = "measure",
+               values_to = "value") |>
+  mutate(facet_labs = case_when(measure == "n_dives" ~ "Number of Dive Cycles in Variant State",
+                                measure == "total_dur" ~ "Total Duration (h) of Variant State"),
+         valueNA = ifelse(type == "Simulated",
+                          NA,
+                          value))
+```
+

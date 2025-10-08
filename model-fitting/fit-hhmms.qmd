@@ -1,0 +1,241 @@
+---
+title: "Fit HHMMs"
+format: html
+editor: source
+---
+
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(FBtagtools)
+library(momentuHMM)
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE,
+                      warning = FALSE)
+
+# if this is round 2+ of fitting the HHMMs
+repeating <- TRUE
+test_run <- TRUE # fastest/least number of iterations for code debugging
+```
+
+```{r}
+source('../utils/getLL.R')
+```
+
+# Read in Data and Models
+
+## Tag Data
+
+```{r, data-in}
+# note that for the public repo, data is stored as part of the fitted model objects
+# so if you want to run this code, comment the code below and get the data there, e.g.
+# hhmm_data <- readRDS("../data/fitted-models/sel_both.RDS")
+# hhmm_data <- hhmm_data$data
+
+if (sum(grepl("Mac", Sys.info()))){
+  ncpath <- "/Users/sld33/Dropbox/FBdata"
+}else{
+  ncpath <- "C:/Users/stacy/Dropbox/FBdata"
+}
+
+hhmm_data <- readRDS(file.path(ncpath, 'hhmm_smrt_data_aug_2025.RDS'))
+```
+
+```{r}
+#| label: prep-hhmm-data
+
+hhmm_data <- hhmm_data |>
+  prepData(coordNames = NULL,
+           covNames = c(
+             "mfas_presence",
+             "mfa_bb_rms_max_scale",
+             "mfa_csel_scale",
+             "sonar_before_eoc",
+             "fine_mfa_bb_rms_max_scale",
+             "fine_mfa_csel_scale"),
+           hierLevels = c("1", "2i", "2"))
+```
+
+## Coarse-only HMM
+
+<!-- see the file _coarse-only.qmd in the model-fitting directory for code -->
+
+{{< include _coarse-only.qmd >}}
+
+## Fine-only HMM
+
+<!-- see the file _fine-only.qmd in the model-fitting directory for code -->
+
+{{< include _fine-only.qmd >}}
+
+# Setup for HHMM
+
+<!-- code to set up hierarchical structure and design matrix for the HHMMs is in the file _hhmm-setup.qmd. -->
+
+{{< include _hhmm-setup.qmd >}}
+
+## Starting values
+
+Initially, use starting values from coarse-only or fine-only HMMs.
+
+If re-fitting a new round of models (if `repeating` is `TRUE`), then start with the best models fitted so far.
+
+Users taking this code from the repository and changing nothing will have `repeating = TRUE` and will re-fit models based on the best fitted models reported in the paper.
+
+```{r}
+if (repeating){
+model_files <- dir(path = "../data/fitted-models/",
+                   pattern = ".RDS")
+            
+model_meta <- 
+  data.frame(filename = paste0("../data/fitted-models/",
+                               model_files)) |>
+  mutate(
+    new_model_file = str_replace_all(filename, pattern = "fitted", 
+                                     replacement = "refitted")) |>
+    # need to remove the "../data..."
+    separate_wider_delim(filename, delim = "/", 
+                                      names = c(NA, NA, NA, "model_name"),
+                         cols_remove = FALSE) |>
+    mutate(model_name = str_remove_all(model_name, 
+                                pattern = fixed(".RDS"))
+    ) |>
+  as.data.frame()
+
+start_models <- list()
+for (m in c(1:nrow(model_meta))){
+  start_models[[m]] <- readRDS(model_meta[m, "filename"])
+  model_meta$full_formula[m] <- as.character(start_models[[m]]$conditions$formula)[2]
+}
+
+# of course we could not set up the formulas this way if the models were not prefitted.
+# but this is a way to get a list of all options included in the paper w/o hand typing them
+model_meta <- model_meta |>
+  separate_wider_delim(full_formula, delim = "I((level == \"2i\") * 1)",
+                       names = c("coarse_formula", "fine_formula"),
+                       cols_remove = FALSE) |>
+  mutate(coarse_formula = str_remove_all(coarse_formula, 
+                                         pattern = fixed("I((level == \"1\") * ")) |>
+           str_squish(),
+         coarse_formula = str_remove_all(coarse_formula, fixed(")")),
+         coarse_formula = str_remove_all(coarse_formula, fixed("0 + 1 +")),
+         coarse_formula = ifelse(str_ends(coarse_formula, fixed("+")),
+                                 word(coarse_formula, start = 1, end = -2),
+                                 coarse_formula),
+         fine_formula = str_remove_all(fine_formula, fixed('+ I((level == "2") * 1)')),
+         fine_formula = str_remove_all(fine_formula, fixed('+ I((level == "2") * ')),
+         fine_formula = str_remove_all(fine_formula, fixed(")")),
+         fine_formula = if_else(is.na(fine_formula), "1", fine_formula),
+         fine_formula = paste0("1", ifelse(fine_formula %in% c("", " "), "", "+"), 
+                               str_squish(fine_formula)),
+         coarse_formula = paste0("1", ifelse(coarse_formula %in% c("", " "), "", "+"),
+                                 str_squish(coarse_formula))
+         ) |>
+  data.frame()
+
+} # end of "if repeating..."
+```
+
+# Fit Models
+
+
+```{r, refit-models}
+n_fit_cycles <- ifelse(test_run, 1, 10)
+if (!repeating){
+  fitted_models <- list()  
+}else{
+  # if at least one round of these fits is already done, 
+  # start w/previously fitted editions
+  fitted_models <- start_models
+}
+
+these_fitted_models <- list()
+# use this in case of an error partway through to start in the middle:
+start_at = matrix(c(1,1,1,1), nrow = 2, byrow = TRUE)
+
+for (c in c(1:n_fit_cycles)){
+  for(rep in c(1:2)){
+    for (m in c(start_at[c,rep]:nrow(model_meta))){
+      message(paste('Round', c, 'of', n_fit_cycles, ', rep ', rep, 
+                    '- Fitting model', m, 'of', nrow(model_meta), 
+                    '. Model name:', model_meta[m, "model_name"]))
+      
+      if (repeating){
+        hierFormula <- fitted_models[[m]]$conditions$hierFormula
+      }else{
+        hierFormula <- data.tree::Node$new("Ziphius HHMM TPM covariates")
+        hierFormula$AddChild(name = "level1", 
+                             formula = as.formula(model_meta[m, "coarse_formula"]))
+        hierFormula$AddChild(name = "level2", 
+                             formula = as.formula(model_meta[m, "fine_formula"]))
+        fixPar <- data.tree::Node$new("Ziphius HHMM fixed values")
+        fixPar$AddChild(name = "beta")
+        fixPar$beta$AddChild(name = "level2")
+        my_fixies <- fitted_models[[m]]$conditions$fixPar$beta
+        if (str_detect(model_meta[m, "model_name"], pattern = "fine") |
+            str_detect(model_meta[m, "model_name"], pattern = "both")){
+          which_fix <- str_starts(colnames(my_fixies), pattern = "1|2|3|4") &
+            str_ends(colnames(my_fixies), pattern = "1|2|3|4")
+          which_rows <- str_detect(rownames(my_fixies), pattern = fixed('level == "2"'))
+          my_fixies[nrow(my_fixies), which_fix] <- 0
+          my_fixies <- my_fixies[which_rows,which_fix]
+          fixPar$beta$level2$AddChild(name = "dive_cycle",
+                                      fixPar = my_fixies)
+        }
+      }
+      
+     if (c == 1 & rep == 1 & !repeating){
+        Par0 <- getPar0(start_model,
+                        hierFormula = hierFormula)
+        hierBeta0 <- Par0$hierBeta
+        hierDelta0 <- Par0$hierDelta
+        Par0 <- Par0$Par
+      }else{
+        if (rep == 1){
+          Par0 <- getPar0(fitted_models[[m]],
+                          hierFormula = hierFormula)
+          hierBeta0 <- Par0$hierBeta
+          hierDelta0 <- Par0$hierDelta
+          Par0 <- Par0$Par
+        }else{
+          Par0 <- getPar0(fitted_models[[which.max(unlist(lapply(fitted_models, getLL)))]],
+                          hierFormula = hierFormula)
+          hierBeta0 <- Par0$hierBeta
+          hierDelta0 <- Par0$hierDelta
+          Par0 <- Par0$Par
+        }
+      }
+      
+      # fit model
+      this_file <- model_meta[m, 'new_model_file']
+
+      this_fit <- try(fitHMM(hhmm_data,
+                             hierStates = hierStates,
+                             hierDist = hierDist,
+                             hierFormula = hierFormula,
+                             Par0 = Par0,
+                             DM = DM,
+                             hierBeta = hierBeta0,
+                             hierDelta = hierDelta0,
+                             optMethod = "nlm",
+                             retryFits = ifelse(test_run, 1, 10),
+                             retrySD = ifelse(rep == 1, 25, 10)
+      ),
+      silent = TRUE
+      )
+      if ("momentuHMM" %in% class(this_fit)){
+        these_fitted_models[[m]] <- this_fit
+        if (c == 1 & rep == 1 & !repeating){
+          # first time thru always save the result
+          fitted_models[[m]] <- this_fit
+          saveRDS(fitted_models[[m]], this_file)
+        }
+        # else only save if it's better than what we already have
+        if (getLL(this_fit) > max(-Inf, getLL(fitted_models[[m]]), na.rm = TRUE)){
+          fitted_models[[m]] <- this_fit
+          saveRDS(fitted_models[[m]], this_file)  
+        }
+      }
+    }
+  }# end of loop over models
+} # end fitting cycles
+```

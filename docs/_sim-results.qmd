@@ -1,0 +1,346 @@
+
+
+# Likelihood Weighting Simulation Results
+
+## Case 1: True Model Includes MFAS Effect
+
+<!-- ### Read in Results -->
+
+```{r}
+sim_files <- list.files(path = "../data/simulations/sonar",
+                        pattern = "*.RDS")
+
+sim_results <- list()
+
+for (f in c(1:length(sim_files))){
+  sim_results[[f]] <- bind_rows(
+    readRDS(
+      file.path(
+        "..",
+        "data",
+        "simulations",
+        "sonar",
+        sim_files[f]))) |>
+    mutate(original_file = f)
+}
+
+sim_results <- bind_rows(sim_results) |>
+  drop_na(LL)
+
+sim_CI <- sim_results
+```
+
+## AIC and likelihood results
+
+```{r}
+sim_results <- sim_results |>
+  mutate(weighted = if_else(str_detect(model_name, "_wt"),
+                            "Yes",
+                            "No"),
+         model_name = str_remove_all(model_name, "_wt")) |>
+  pivot_wider(names_from = "model_name",
+              values_from = c("AIC", "LL"),
+              id_cols = c("sim_num", "original_file", "weighted")) |>
+  mutate(dAIC = AIC_no_sonar - AIC_rl_coarse,
+         dLL =  LL_rl_coarse - LL_no_sonar)
+```
+
+::: {#suppfig-aic-with-weights}
+
+```{r}
+gf_violin(dAIC ~ weighted, data = sim_results) |>
+  gf_sina() |>
+  gf_refine(scale_y_continuous(trans='log2')) |>
+  gf_labs(y = "AIC difference\n(with minus without MFAS covariate)",
+          x = "Weighted Likelihood?")
+```
+
+By what margin would model selection using AIC select the true model (with MFAS effect), with and without duration-weighting applied to the likelihood?
+:::
+
+::: {#supptab-daic-with-weights}
+
+```{r}
+
+selection_table1 <- mosaic::prop(~dAIC >= 6 | weighted, data = sim_results) |>
+  data.frame()
+names(selection_table1) <- "Proportion dAIC > 6"
+
+selection_table1 <- selection_table1 |>
+  mutate(`Weighting?` = c("No", "Yes")) |>
+  select("Weighting?", "Proportion dAIC > 6")
+  
+  gt(selection_table1)
+```
+
+Proportion of simulations where the difference in AIC (model with MFAS minus model without) exceeded 6, when the true model was one with MFAS effect.
+:::
+
+## Confidence Interval Coverage
+
+
+```{r}
+fitted_model <- 
+  readRDS("../data/simulations/sim_starting_model.RDS")
+```
+
+```{r}  
+true_params <- fitted_model$mle 
+true_mfas <- true_params$beta['I((level == "1") * mfa_bb_rms_max_scale)',
+                      c("1 -> 5", "5 -> 1")]
+```
+
+```{r}
+sim_CI <- sim_CI |>
+  mutate(true_15 = true_mfas["1 -> 5"],
+         true_51 = true_mfas["5 -> 1"]) |>
+  mutate(true_15_in_CI = if_else(t15lower <= true_15 &
+                                   t15upper >= true_15,
+                                 1,
+                                 0),
+         true_51_in_CI = if_else(t51lower <= true_51 &
+                                   t51upper >= true_51,
+                                 1,
+                                 0),
+         AE_15 = abs(t15est - true_15),
+         AE_51 = abs(t51est - true_51),
+         row_num = c(1:n()),
+         pretty_name = case_when(model_name == "rl_coarse" ~ "No Weighting",
+                                 model_name == "rl_coarse_wt" ~ "Weighted"))
+
+CI_summary <- sim_CI |>
+  drop_na(t15est) |>
+  group_by(model_name) |>
+  summarise(
+    n_NA_15 = sum(is.na(true_15_in_CI)),
+    n_NA_51 = sum(is.na(true_51_in_CI)),
+    n_total = n(),
+    prop_in_CI_15 = sum(true_15_in_CI, na.rm = TRUE) / sum(!is.na(true_15_in_CI)) * 100,
+    prop_in_CI_51 = sum(true_51_in_CI, na.rm = TRUE) / sum(!is.na(true_51_in_CI)) * 100,
+    MAE_15 = mean(AE_15, na.rm = TRUE) / abs(first(true_15)) * 100,
+    MAE_51 = mean(AE_51, na.rm = TRUE) / abs(first(true_51)) * 100) |>
+  ungroup() |>
+  mutate(across((starts_with("MAE") | starts_with("prop_")), function(x) signif(x, 3))) |>
+  rename(`Model Name` = model_name,
+         `NAs in P(T->V)` = n_NA_15,
+         `NAs in P(V->T)` = n_NA_51, # very hard to estimate b/c sample size too small
+         `N Simulations` = n_total,
+         `CI Coverage (% P(T->V))` = prop_in_CI_15,
+         `CI Coverage (% P(V->T))` = prop_in_CI_51,
+         `Mean Absolute Error (% P(T->V))` = MAE_15,
+         `Mean Absolute Error (% P(V->T))` = MAE_51
+         )
+```
+
+::: {#supptab-ci-summary}
+
+```{r}
+gt(CI_summary)
+```
+
+Confidence interval coverage in simulations, for simulations in which the true model included an effect of MFAS on the transition rates. "T->V" is the probability of transition from Typical to Variant state, and "V->T" is Variant to Typical.
+:::
+
+::: {#suppfig-mfas-cis-15}
+
+```{r}
+#| label: CIs-15
+gf_point(t15est ~ row_num, 
+         data = sim_CI |> filter(grepl(model_name, pattern = "rl") &
+                                         !is.na(true_15_in_CI)),
+         size = 0.2,
+         color = ~factor(true_15_in_CI)) |>
+  gf_theme(scale_color_manual(values = c("goldenrod", "black"))) |>
+  gf_errorbar(t15lower + t15upper ~ row_num,
+              color = "grey44", alpha = 0.5) |>
+  gf_facet_wrap(~pretty_name, ncol = 1) |>
+  gf_hline(yintercept = sim_CI[1, "true_15"], color = 'darkred', linetype = "dashed") |>
+  gf_theme(legend.position = "none") |>
+  gf_labs(y = "MFAS Parameter\n(Typical to Variant)",
+          x = "Simulation Number")
+```
+
+Parameter estimates and 95% confidence intervals for the parameter measuring the effect of MFAS on transition from Typical to Variant state. Dotted horizontal line shown the true value of the parameter.
+:::
+
+::: {#suppfig-mfas-cis-51}
+
+```{r}
+#| label: CIs-51
+gf_point(t51est ~ row_num, 
+         data = sim_CI |> filter(grepl(model_name, pattern = "rl") &
+                                   !is.na(true_51_in_CI)),
+         size = 0.2,
+         color = ~factor(true_51_in_CI)) |>
+  gf_theme(scale_color_manual(values = c("goldenrod", "black"))) |>
+  gf_errorbar(t51lower + t51upper ~ row_num,
+              color = "grey44", alpha = 0.5) |>
+  gf_facet_wrap(~pretty_name, ncol = 1) |>
+  gf_hline(yintercept = sim_CI[1, "true_51"], color = 'darkred', linetype = "dashed") |>
+  gf_theme(legend.position = "none") |>
+  gf_labs(y = "MFAS Parameter\n(Variant to Typical)",
+          x = "Simulation Number")
+```
+
+Parameter estimates and 95% confidence intervals for the parameter measuring the effect of MFAS on transition from Variant to Typical state (note, this one is not estimated well because of the small size of the dataset). Dotted horizontal line shown the true value of the parameter.
+:::
+
+
+## Power
+
+Based on CIs, how often would we conclude there IS an MFAS effect (when there really is)?
+
+::: {#supptab-power}
+
+```{r}
+A <- sim_CI |>
+  group_by(model_name) |>
+  drop_na(t15upper, t15lower) |>
+  summarise(
+    prop_MFAS_effect_15 = sum( 
+      (sign(t15upper) * sign(t15lower)) == 1 &
+        sign(true_15) == sign(t15upper)
+    ) / n() * 100
+  )
+
+B <- sim_CI |>
+  group_by(model_name) |>
+  drop_na(t51upper, t51lower) |>
+  summarise(
+    prop_MFAS_effect_51 = sum( 
+      (sign(t51upper) * sign(t51lower)) == 1 &
+        sign(true_51) == sign(t51upper)
+    ) / n() * 100
+  )
+
+left_join(A,B, by = join_by(model_name)) |>
+  rename(`Model Name` = model_name,
+         `Power (%, P(T->V))` = prop_MFAS_effect_15,
+         `Power (%, P(V->T))` = prop_MFAS_effect_51
+         ) |>
+  mutate(across(where(is.numeric), function(x) signif(x, 3))) |>
+  gt()
+```
+
+Power to detect MFAS effect when it is really present.
+:::
+
+## Case 2: True Model Excludes MFAS Effect
+
+<!-- ### Read in Results -->
+
+```{r}
+sim_files2 <- list.files(path = "../data/simulations/no-sonar",
+                        pattern = "*.RDS")
+
+sim_results2 <- list()
+
+for (f in c(1:length(sim_files2))){
+  sim_results2[[f]] <- bind_rows(
+    readRDS(
+      file.path(
+        "..",
+        "data",
+        "simulations",
+        "no-sonar",
+        sim_files2[f]))) |>
+    mutate(original_file = f)
+}
+
+sim_results2 <- bind_rows(sim_results2) |>
+ drop_na(LL)
+
+sim_CI2 <- sim_results2
+```
+
+### AIC and likelihood results
+
+::: {#suppfig-dAIC2}
+
+```{r}
+sim_results2 <- sim_results2 |>
+  mutate(weighted = if_else(str_detect(model_name, "_wt"),
+                            "Yes",
+                            "No"),
+         model_name = str_remove_all(model_name, "_wt")) |>
+  pivot_wider(names_from = "model_name",
+              values_from = c("AIC", "LL"),
+              id_cols = c("sim_num", "original_file", "weighted")) |>
+  mutate(dAIC = AIC_no_sonar - AIC_rl_coarse,
+         dLL =  LL_rl_coarse - LL_no_sonar)
+
+gf_violin(dLL ~ weighted, data = sim_results2) |>
+  gf_sina() |>
+  gf_refine(scale_y_continuous(trans='log2')) |>
+  gf_labs(y = "AIC difference\n(with minus without MFAS covariate)",
+          x = "Weighted Likelihood?")
+```
+
+By what margin would model selection using AIC select the true model (*without* MFAS effect -- so a small AIC difference would be hoped for), with and without duration-weighting applied to the likelihood?
+:::
+
+
+::: {#supptab-daic-with-weights2}
+
+```{r}
+selection_table2 <- mosaic::prop(~dAIC >= 6 | weighted, data = sim_results2) |>
+  data.frame()
+names(selection_table2) <- "Proportion dAIC > 6"
+
+selection_table2 <- selection_table2 |>
+  mutate(`Weighting?` = c("No", "Yes")) |>
+  select("Weighting?", "Proportion dAIC > 6")
+  
+  gt(selection_table2)
+```
+
+Proportion of simulations where the difference in AIC (model with MFAS minus model without) exceeded 6, when the true model was one *without* MFAS effect.
+:::
+
+### Confidence Interval Coverage
+
+```{r}
+sim_CI2 <- sim_CI2 |>
+  mutate(true_15 = 0,
+         true_51 = 0 ) |>
+  mutate(true_15_in_CI = if_else(t15lower <= true_15 &
+                                   t15upper >= true_15,
+                                 1,
+                                 0),
+         true_51_in_CI = if_else(t51lower <= true_51 &
+                                   t51upper >= true_51,
+                                 1,
+                                 0),
+         row_num = c(1:n()),
+         pretty_name = case_when(model_name == "rl_coarse" ~ "No Weighting",
+                                 model_name == "rl_coarse_wt" ~ "Weighted"))
+
+CI_summary2 <- sim_CI2 |>
+  drop_na(t15est) |>
+  group_by(model_name) |>
+  summarise(
+    n_NA_15 = sum(is.na(true_15_in_CI)),
+    n_NA_51 = sum(is.na(true_51_in_CI)),
+    n_total = n(),
+    prop_in_CI_15 = sum(true_15_in_CI, na.rm = TRUE) / sum(!is.na(true_15_in_CI)) * 100,
+    prop_in_CI_51 = sum(true_51_in_CI, na.rm = TRUE) / sum(!is.na(true_51_in_CI)) * 100) |>
+  ungroup() |>
+  mutate(across((starts_with("MAE") | starts_with("prop_")), function(x) signif(x, 3))) |>
+  rename(`Model Name` = model_name,
+         `NAs in P(T->V)` = n_NA_15,
+         `NAs in P(V->T)` = n_NA_51, # very hard to estimate b/c sample size too small
+         `N Simulations` = n_total,
+         `CI Coverage (% P(T->V))` = prop_in_CI_15,
+         `CI Coverage (% P(V->T))` = prop_in_CI_51
+         )
+```
+
+::: {#supptab-ci-summary2}
+
+```{r}
+gt(CI_summary2)
+```
+
+Confidence interval coverage in simulations, for simulations in which the true model *did not include* an effect of MFAS on the transition rates. "T->V" is the probability of transition from Typical to Variant state, and "V->T" is Variant to Typical.
+:::
+

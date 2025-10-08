@@ -1,0 +1,205 @@
+---
+title: "Fit finescale only"
+format: html
+editor: visual
+---
+
+Fit models with finescale data streams only, assuming coarse scales
+states are known (from coarse only model with RL covariate).
+
+This is to refine starting parameter estimates for the state-dependent
+distributions and the TPM.
+
+Then, will fit the true HHMM.
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(FBtagtools)
+library(momentuHMM)
+knitr::opts_chunk$set(echo = TRUE, cache = FALSE)
+```
+
+```{r}
+source('getLL.R')
+```
+
+```{r, data-in}
+if (sum(grepl("Mac", Sys.info()))){
+  ncpath <- "/Users/sld33/Dropbox/FBdata"
+}else{
+  error("need to write PC version")
+}
+
+hhmm_data <- readRDS(file.path(ncpath, 'hhmm_smrt_data25.RDS')) |>
+  mutate(across(contains("_presence"), as.numeric)) |>
+  group_by(whale_ID, dive_cycle_num) |>
+  tidyr::fill(anthro_presence, .direction = "down") |>
+  ungroup() |>
+  mutate(sonar_before_eoc = as.numeric(sonar_before_eoc),
+         mfa_bb_rms_max_scale = 
+           (mfa_bb_rms_max_67 - 40) / max((mfa_bb_rms_max_67 - 40), 
+                                          na.rm = TRUE),
+         fine_mfa_bb_rms_max_scale = 
+           (fine_mfa_bb_rms_max_67 - 40) / max((fine_mfa_bb_rms_max_67 - 40), 
+                                               na.rm = TRUE),
+         across(contains("rms_max_scale"), function(x) ifelse(x < 0, 0, x)),
+         mfas_presence = ifelse(mfa_n_pings >0, 1, 0),
+         across(contains("_presence"), as.numeric),
+         max_depth_km = max_depth / 1000) |>
+  filter(level == '2')
+
+coarse_model <- readRDS(
+  file.path(
+    ncpath,
+    'fittedHHMMs2025',
+    'level1',
+    paste0('rl_coarse', '.RDS'))
+)
+
+# there were issues w viterbi for non hier hmm need to make fitHMM for non hier add in equal weights to output!
+coarse_states0 <- coarse_model$data |> 
+  select(whale_ID, dive_cycle_num) |>
+  mutate(response_state = momentuHMM::viterbi(coarse_model))
+
+hhmm_data <- left_join(hhmm_data, coarse_states0, by = c('whale_ID', 'dive_cycle_num')) |>
+  mutate(response_state = ifelse(response_state == 2, 1, 0))
+
+# pull(coarse_states, state) will give the 0 if baseline, 1 if response @ coarse 
+
+```
+
+```{r, prep-hhmm-data}
+
+hhmm_data <- hhmm_data  |>
+  prepData(coordNames = NULL,
+           covNames = c('fine_mfa_bb_rms_max_scale',
+                        'response_state'))
+```
+
+Read in fitted model for coarse state info
+
+### Starting values
+
+```{r}
+# fine scale
+
+state_dep_dists <- list("pct90_msa" = "gamma",
+                        "strokes_per_sec" = "weibull",
+                        "clicks_present" ="bern",
+                        "std_head" = "gamma"
+                      )
+```
+
+```{r, fine-start-vals}
+# defining starting values
+
+msa.mu0 = c(0.66, 3.2, 1, 0.42)
+msa.sigma0 = c(0.22,1.2,0.34, 0.29)
+
+stroke.shape0 = c(1.8, 2, 4, 0.5)
+stroke.scale0 = c(0.5, 0.5, 0.4, 0.4)
+stroke.zeromass0 = c(2e-11,0.003, 1e-13, 0.1)
+
+ck.prob0 = c(0.9, 0.3, 0.01, 0.01)
+
+head.mu0 = c(2, 2, 1, 0.1)
+head.sigma0 = c(0.5, 0.5, 0.5, 0.1)
+
+```
+
+```{r, construct-par0}
+Par00 <- list(# fine scale
+             # std_pitch = c(pitch.mu0, pitch.sigma0),
+             # std_roll = c(roll.mu0, roll.sigma0),
+             # std_head = c(head.mu0, head.sigma0),
+             pct90_msa = c(msa.mu0, msa.sigma0),
+             # wiggles = c(wig.shape10, wig.shape20, wig.zeromass0),
+             # med_speed = c(speed.mu0, speed.sigma0),
+             # # med_vv = c(vv.mu0, vv.sigma0),
+             # # med_depth = c(z.mu0, z.sigma0),
+             strokes_per_sec = c(stroke.shape0, stroke.scale0, stroke.zeromass0),
+             # rms_stroke = c(rms.stroke.mu0, rms.stroke.sigma0),
+             clicks_present = c(ck.prob0),
+             std_head = c(head.mu0, head.sigma0))
+```
+
+# RL only models - more data since don't require valid distance estimates
+
+```{r rl-model-list}
+rl_model_meta <- data.frame(model_name = 
+                              c('response_state_only',
+                                'rl_fine'
+                                ),
+                            fine_formula = c("~response_state",
+                                             "~response_state + fine_mfa_bb_rms_max_scale"
+                                             )
+                            )
+
+rl_model_meta <- rl_model_meta |>
+  mutate(model_file = file.path(
+    ncpath,
+    'fittedHHMMs2025',
+    'level2-4state',
+    paste0(model_name, '.RDS'))) |>
+  as.data.frame()
+
+```
+
+```{r, fit-models}
+n_fit_cycles <- 10
+fitted_models <- list()
+for (c in c(1:n_fit_cycles)){
+  these_fitted_models <- list()
+  for(rep in c(1:2)){
+    for (m in c(1:nrow(rl_model_meta))){
+      message(paste('Round', c, 'of', n_fit_cycles, 
+                    '- Fitting model', m, 'of', nrow(rl_model_meta), 
+                    '. Model name:', rl_model_meta[m, "model_name"]))
+      
+     if (m == 1 & rep == 1){
+        Par0 <- Par00
+        beta0 <- NULL
+        delta0 <- NULL
+      }else{
+        Par0 <- getPar0(these_fitted_models[[which.max(unlist(lapply(these_fitted_models, getLL)))]],
+                        formula = as.formula(rl_model_meta[m, "fine_formula"]))
+        if (any(Par0$Par$clicks_present == 1)){
+          Par0$Par$clicks_present[Par0$Par$clicks_present == 1] <- 0.99
+        }
+        beta0 <- Par0$beta
+        delta0 <- Par0$delta
+        Par0 <- Par0$Par
+      }
+      
+      # fit model
+      this_file <- rl_model_meta[m, 'model_file']
+      this_fit <- try(fitHMM(hhmm_data,
+                             nbStates = 4,
+                             dist = state_dep_dists,
+                             formula = as.formula(rl_model_meta[m, "fine_formula"]),
+                             Par0 = Par0,
+                             beta0 = beta0,
+                             delta0 = delta0,
+                             optMethod = "nlm",
+                             retryFits = 100,
+                             retrySD = ifelse(rep == 1, 250, 10)
+      ),
+      silent = TRUE
+      ) # note: try() is in case on non-finite starting values etc that error out fitHMM()
+      if ("momentuHMM" %in% class(this_fit)){
+        these_fitted_models[[m]] <- this_fit
+        if (c == 1){ 
+          fitted_models[[m]] <- these_fitted_models[[m]]
+          saveRDS(fitted_models[[m]], this_file)
+        }
+        if (c > 1 & getLL(these_fitted_models[[m]]) > getLL(fitted_models[[m]])){
+          fitted_models[[m]] <- these_fitted_models[[m]]
+          saveRDS(fitted_models[[m]], this_file)  
+        }
+        
+      }
+      
+    }
+}# end of loop over models
+} # end fitting cycles
+```

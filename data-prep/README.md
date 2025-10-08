@@ -1,0 +1,4 @@
+# Data Notes
+This directory includes the code used to process the data prior to model fitting, starting with the netCDF tag archives and acoustic wave files. These massive files are not included in the repository (multiple GB of data) and are not currently shared publicly as there is not a file-format standard or data archive that is appropriate for this type of high-resolution movement tag data. Standards development is underway and we hope to eventually deposit the full raw tag data in an appropriate repo. Meanwhile the processed data to which the HHMMs were fitted is included in the fitted model objects (see the fitted-models subdirectory in the data directory of this repository).
+
+These operations were done in Matlab (Mathworks, Natick, MA) because filtering and processing of the largest data matrices is much faster in Matlab (for now).

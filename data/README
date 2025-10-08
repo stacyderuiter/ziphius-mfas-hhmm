@@ -1,0 +1,2 @@
+Note: data to which the HHMMs were fitted is stored in the fitted model objects, so can be found in the fitted-models directory.
+Load the RDS file for one of the models; it has a list-item data which is the dataset.

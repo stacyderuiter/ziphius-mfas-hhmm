@@ -1,0 +1,1635 @@
+---
+title: "Graphs and Tables for *Ziphius* HHMM Paper Supplement"
+format: 
+  html:
+    toc: true
+    embed-resources: true
+  typst: 
+    toc: true
+    fontsize: "10pt"
+  docx: 
+    toc: true
+toc: true
+crossref:
+  custom:
+    - kind: float
+      key: suppfig
+      latex-env: suppfig
+      reference-prefix: Figure S
+      space-before-numbering: false
+      latex-list-of-description: Supplementary Figure
+    - kind: float
+      key: supptab
+      latex-env: supptab
+      reference-prefix: Table S
+      space-before-numbering: false
+      latex-list-of-description: Supplementary Table
+fig-dpi: 300
+editor: source
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(momentuHMM)
+library(tidyverse)
+library(ggplot2)
+library(ggforce)
+library(ggformula)
+library(patchwork)
+library(plotly)
+library(htmltools)
+library(gt)
+library(ggh4x)
+library(mvtnorm)
+
+knitr::opts_chunk$set(echo = FALSE, message = FALSE, warning = FALSE,
+                      fig.path = "figures/supplemental/zc-mfas-hhmm-supplement-",
+                      dpi = 300,                     
+                      dev = c("png", "CairoJPEG", "cairo_pdf"),
+                      fig.width = 3.34646, # "85mm" 
+                      fig.height = 2.5 # "65mm"
+                      )
+
+options(knitr.table.format = "latex")
+
+theme_set(theme_minimal(base_size = 11))
+```
+
+{{< include _data-in.qmd >}}
+
+::: {.landscape}
+
+# Supplemental Tables {.smaller}
+
+## Dive-cycle Summary
+
+```{r}
+L1_table <- L1_data |>
+  mutate(sonar_before_eoc = if_else(sonar_before_eoc == 1, "Yes", "No"),
+         echo_presence = if_else(echo_presence == 1, "Yes", "No"),
+         impulsive_presence = if_else(impulsive_presence == 1, "Yes", "No"),
+         orca_presence = if_else(orca_presence == 1, "Yes", "No"),
+         mfa_csel = if_else(is.na(mfa_csel), "None", as.character(mfa_csel)),
+         mfa_bb_rms_max_67 = if_else(mfa_bb_rms_max_67 == 0 | is.na(mfa_bb_rms_max_67),
+                                     "None", as.character(mfa_bb_rms_max_67))) |>
+  rename(`Whale ID` = whale_ID,
+         `Start Time (UTC)` = start_time_UTC,
+         State = coarse_state,
+         `Sonar before EOE?` = sonar_before_eoc,
+         `MFAS RL` = mfa_bb_rms_max_67,
+         `MFAS cSEL` = mfa_csel,
+         `Echosounder Present?` = echo_presence,
+         `Impulsive Sounds Present?` = impulsive_presence,
+         `Orca Sounds Present?` = orca_presence,
+         `Duration (hours)` = dur_hours,
+         `Foraging Dive Duration (hours)` = fd_dur_hours,
+         `Maximum Dive Depth (km)` = max_depth_km,
+         `Echolocation Clicking Duration (minutes)` = click_dur_mins,
+         `N Non-foraging Dives` = nshal,
+         `Longest Non-foraging Dive (hours)` = longest_nf_dur_hours,
+         `Surface Time (hours)` = surf_hours,
+         `Distance Traveled (km)` = step
+         ) 
+```
+
+`#show figure: set block(breakable: true)`{=typst}
+
+:::: {#supptab-dive-cycle-table}
+
+```{r}
+if (!(knitr::is_html_output())) {
+  L1_table |> gt() |>
+  tab_style(
+    style = cell_text(size = pct(25)),
+    locations = list(cells_body(), cells_column_labels())
+  )
+}else{
+  L1_table |> DT::datatable()
+}
+```
+
+Summary information about each foraging dive cycle included in the HHMM analysis.
+::::
+
+
+
+## MFAS exposure details
+
+```{r}
+MFAS_table_whales <- L1_data |>
+  filter(mfa_csel > 0) |>
+  group_by(whale_ID) |>
+  summarise(
+    `Dives with MFAS` = n(),
+    across(c(mfa_bb_rms_max_67, mfa_csel),
+           .fns = list(min = min,
+                       max = max,
+                       median = median,
+                       IQR = IQR,
+                       mean = mean,
+                       sd = sd
+           )
+    )
+  ) |>
+  ungroup() |>
+  mutate(across(where(is.numeric),
+                function(x) round(x, digits = 1))
+  )
+
+MFAS_table_totals <- L1_data |>
+  filter(mfa_csel > 0) |>
+  summarise(
+    whale_ID = "Total",
+    `Dives with MFAS` = n(),
+    across(c(mfa_bb_rms_max_67, mfa_csel),
+           .fns = list(min = min,
+                       max = max,
+                       median = median,
+                       IQR = IQR,
+                       mean = mean,
+                       sd = sd
+           )
+    ) |>
+      ungroup() |>
+      mutate(across(where(is.numeric),
+                    function(x) round(x, digits = 1))
+      )
+  )
+
+MFAS_table <- bind_rows(MFAS_table_whales,
+                        MFAS_table_totals) |>
+  rename(`Whale ID` = whale_ID)
+
+names(MFAS_table) <- str_replace_all(names(MFAS_table),
+                                     pattern = "mfa_bb_rms_max_67_",
+                                     replacement = "MFAS RMS ")
+
+names(MFAS_table) <- str_replace_all(names(MFAS_table),
+                                     pattern = "mfa_csel_",
+                                     replacement = "MFAS cSEL ")
+
+names(MFAS_table) <- str_replace_all(names(MFAS_table),
+                                     c(min = "(Min.)",
+                                       max = "(Max.)",
+                                       median = "(Median)",
+                                       IQR = "(IQR)",
+                                       mean = "(Mean)",
+                                       sd = "(SD)"))
+```
+
+:::: {#supptab-mfas-table}
+
+```{r}
+if (knitr::is_html_output()) {
+  MFAS_table |> DT::datatable(options  = list(pageLength = 13))
+} else {
+  MFAS_table |> gt() |>
+  tab_style(
+    style = cell_text(size = pct(50)),
+    locations = list(cells_body(), cells_column_labels())
+  )
+}
+```
+
+MFAS exposure data summarised by SMRT tag deployment. Note that dive cycles where acoustic audits indicated MFAS presence, but for which SNR was too low to report any measures RMS or cSEL values, are not included in this table.
+::::
+
+## Variant State Occurrence per MFAS-exposed Dive Cycle
+
+```{r}
+variant_by_exposure_table <- L1_table |>
+  filter(`MFAS cSEL` != "0") |>
+  select(`Whale ID`,
+         `Start Time (UTC)`,
+         `Sonar before EOE?`,
+         `MFAS RL`, 
+         `MFAS cSEL`,
+         # `Echosounder Present?`,
+         # `Impulsive Sounds Present?`,
+         # `Orca Sounds Present?`,
+         State) |>
+  mutate(across(c("MFAS cSEL", 
+                  "MFAS RL"),
+                parse_number))
+
+variant_by_exposure_table <- 
+  left_join(variant_by_exposure_table,
+            resp_dur |> drop_na(variant_num) |> select(whale_ID, start_time_UTC, variant_num),
+            by = join_by(`Whale ID` == "whale_ID", `Start Time (UTC)` == "start_time_UTC")) |>
+  mutate(`Variant State?` = ifelse(!is.na(variant_num), 'Yes', 'No'))
+
+variant_by_exposure_table <- 
+  left_join(variant_by_exposure_table,
+            variant_summary |> drop_na(variant_num) |>
+              select(whale_ID, bout_start_time_UTC, initial_csel, variant_num, n_dives, total_dur),
+            by = join_by(`Whale ID` == "whale_ID", variant_num)) |>
+  mutate(`Variant State?` = ifelse(`Variant State?` == "Yes" & 
+                                     `Start Time (UTC)` != bout_start_time_UTC,
+                                   "Started Earlier",
+                                   `Variant State?`)) |>
+  select(-variant_num, -initial_csel) |>
+  rename(`N Variant Dive Cycles` = n_dives,
+         `Variant State Duration (hr)` = total_dur) |>
+  mutate(across(where(is.numeric), function(x) round(x, digits = 1))) |>
+  ungroup() |>
+  arrange(`MFAS cSEL`)
+```
+
+:::: {#supptab-exp-response-table}
+
+```{r}
+if (knitr::is_html_output()) {
+  variant_by_exposure_table |> DT::datatable(options  = list(pageLength = 52))
+} else {
+  variant_by_exposure_table |> gt() |>
+  tab_style(
+    style = cell_text(size = pct(50)),
+    locations = list(cells_body(), cells_column_labels())
+  )
+}
+```
+
+Occurrence of Variant state for each dive cycle that contained detected MFAS sounds.
+::::
+
+Here, we see that whales transitioned to Variant state in `r sum(variant_by_exposure_table[,"Variant State?"] == "Yes")` out of `r nrow(variant_by_exposure_table)` MFAS-exposed dive cycles (`r round(100 * sum(variant_by_exposure_table[,"Variant State?"] == "Yes") / nrow(variant_by_exposure_table), digits = 1)` percent).
+
+If we consider only dive cycles where the MFAS cSEL was above 110 dB re 1$\mu Pa^2*sec$, then that becomes `r sum(variant_by_exposure_table[,"Variant State?"] == "Yes" & variant_by_exposure_table[,"MFAS cSEL"] > 110)` out of `r nrow(variant_by_exposure_table[variant_by_exposure_table[,"MFAS cSEL"] > 110,])` MFAS-exposed dive cycles (`r round(100 * sum(variant_by_exposure_table[,"Variant State?"] == "Yes" & variant_by_exposure_table[,"MFAS cSEL"] > 110) / nrow(variant_by_exposure_table[variant_by_exposure_table[,"MFAS cSEL"] > 110,]), digits = 1)` percent).
+
+
+Note: Each table printed above is also available as a text file in the `data` directory.
+
+```{r}
+# by tag deployment
+write_csv(MFAS_table,
+          file = "../data/mfas-summary-table.csv")
+
+# by foraging dive cycle
+write_csv(L1_table,
+          file = "../data/dive-cycle-table.csv")
+
+# by MFAS-exposed dive cycle
+write_csv(variant_by_exposure_table,
+          file = "../data/variant-by-exposure-table.csv")
+```
+
+## Duration of Variant State
+
+### Data Variant State Bouts
+
+:::: {#supptab-all-variant-bouts}
+
+```{r}
+var_sum_tab <- variant_summary |>
+  select(-type) |>
+  rename(`Whale ID` = whale_ID,
+         `Bout Number` = variant_num,
+         `Start Time (UTC)` = bout_start_time_UTC,
+         `N Dive Cycles` = n_dives,
+         `Total Duration (h)` = total_dur,
+         `Initial MFAS cSEL` = initial_csel
+         ) |> 
+  mutate(across(where(is.numeric), function(x) round(x, digits = 1))) 
+
+if (knitr::is_html_output()) {
+  var_sum_tab |> DT::datatable(options  = list(pageLength = 53))
+} else {
+  var_sum_tab |> gt() |>
+  tab_style(
+    style = cell_text(size = pct(50)),
+    locations = list(cells_body(), cells_column_labels())
+  )
+}
+```
+
+Variant state bouts observed in the SMRT data, according to the fitted HHMM.
+::::
+
+:::: {#suppfig-variant-hist}
+
+
+```{r, n-dives}
+
+gf_histogram(~response_dur_dives, data = sim_responses) |>
+  gf_rug(~n_dives, data = variant_summary, linewidth = 0.75, alpha = 0.2) |>
+  gf_labs(x = 'Expected Response Duration (dives)', y = 'N Simulated Whales')
+  
+```
+
+Histogram of observed and simulated Variant state bouts.
+::::
+
+### Summary 
+
+:::: {#supptab-variant-bouts} 
+
+```{r}
+variant_dur |>
+  group_by(type, facet_labs) |>
+  drop_na(value) |>
+  summarise(median = median(value),
+            IQR = IQR(value),
+            mean = mean(value),
+            sd = sd(value),
+            min = min(value),
+            max = max(value)
+            ) |>
+  ungroup() |>
+  rename(Type = type,
+         Metric = facet_labs) |>
+  mutate(across(where(is.numeric), function(x) round(x, digits = 1))) |>
+  arrange(Type, Metric) |>
+  gt()
+```
+Summary of Variant state bout duration in dive cycles and hours, for both observed data and simulations based on the fitted HHMM (in which no MFAS exposure occurs after initiation of Variant state).
+::::
+
+
+## Tallying 5-Minute States
+
+```{r}
+fine_tally <- data |>
+  mutate(MFAS = ifelse(fine_mfa_csel_scale > 0, "MFAS", "No MFAS")) |>
+  group_by(coarse_state, state4, MFAS) |>
+  summarise(`5-Minute Intervals` = n(),
+            .groups = "drop") |>
+  group_by(coarse_state, MFAS) |>
+  mutate(Percent = round(100* `5-Minute Intervals` / sum(`5-Minute Intervals`), digits = 1),
+         .groups = "drop") |> 
+  rename(`Dive Cycle State` = coarse_state,
+         `5-minute State` = state4) |> 
+  pivot_wider(id_cols = c("5-minute State", "MFAS"),
+              names_from = `Dive Cycle State`,
+              names_sep = " ",
+              values_from = c("5-Minute Intervals",
+                              "Percent"),
+              names_glue = "{`Dive Cycle State`} {.value}",)
+```
+
+:::: {#supptab-fine-tally}
+
+```{r}
+if (knitr::is_html_output()){
+  DT::datatable(fine_tally)
+}else{
+  gt::gt(fine_tally)
+}
+```
+
+Occurrences of each of the four states at the five-minute timescale, by HHMM state and MFAS presence.
+::::
+
+## MFAS Received Level Data Table
+
+All received level values (for each received sound, as opposed to summarised over 5-minute or dive-cycle periods) are also available as text files.
+
+File name: `mfas-raw-rls.csv` (located in the `data` directory).
+
+```{r}
+#| include: false
+#| eval: false
+# remotes::install_github("stacyderuiter/FBtagtools")
+# you have the output but you need more raw data to run this chunk
+if (sum(grepl("Mac", Sys.info()))){
+  pingpath <- "/Users/sld33/Dropbox/FBdata/RLs"
+  boomin_pingpath <- "/Users/sld33/Dropbox/BOOMIN/RLs"
+  ncpath <- "/Users/sld33/Dropbox/FBdata"
+  droppath <- "/Users/sld33/Dropbox/"
+}else{
+  ncpath <- "C:/Users/stacy/Dropbox/FBdata"
+  pingpath <- "C:/Users/stacy/Dropbox/FBdata/RLs"
+  boomin_pingpath <- "C:/Users/stacy/Dropbox/BOOMIN/RLs"
+  droppath <- "C:/Users/stacy/Dropbox"
+}
+
+rlfiles <- paste0(pingpath, c('/Zica-20191012-144029.csv',
+             '/Zica-20191012-145101.csv',
+             '/Zica-20191111-94810.csv',
+             '/Zica-20191117-195993.csv',
+             '/Zica-20211112-94819.csv',
+             '/Zica-20211113-195993.csv',
+             '/Zica-20220112-195994.csv',
+             '/Zica-20230518-233391.csv',
+             '/Zica-20230519-232950.csv',
+             '/Zica-20230723-233394.csv', 
+             '/Zica-20230723-233395.csv',
+             '/Zica-20240227-233396.csv',
+             '/Zica-20240227-240128.csv'))
+
+fb_rls <- FBtagtools::extract_rls(rl_file = rlfiles,
+                       signal = c('MFAS'),
+                       save_output = TRUE,
+                       path = "../data",
+                       out_file = "mfas-raw-rls.csv") 
+```
+
+:::
+
+`#set block(breakable: false)`{=typst}
+
+# Time-series plots for each tag deployment
+
+## Dive Profile Plots
+
+Below are dive trace time-series plots for all whales with RLs and coarse-scale state indicated.
+
+In these plots:
+
+- Grey shading indicates a dive cycle that was classed as Variant state
+- Received levels are shown in lower plots. The lines indicate cumulative SEL (cumulative by dive cycle; for the 5-minute scale, SEL is cumulative across a single dive cycle up to the end of the current 5-minute interval). Dots indicate RMS RL.
+- Depths shown are the medians in 5-minute intervals (so may not reach the surface, etc.)
+- In the static plots (in PDF output file format), colors indicate the fine-scale (5-minute) states
+- In interactive plots (in html output file format),
+  - You can zoom!
+  - Mouse over the depth trace to get the 5-minute state
+  - Mouse over the RL dot to get the exact RL value
+
+```{r, depth-states-func}
+
+plot_dive_profile <- function(whale, data, 
+                              depth_lim = NULL, 
+                              interactive = FALSE, 
+                              show_explos = TRUE, 
+                              show_echo = TRUE,
+                              show_orca = TRUE,
+                              static_plot_base_size = 6){
+  # prep data
+  this_whale_fine <- data |>
+    filter(level == '2' & whale_ID == whale) |>
+    mutate(tracegroup = "1") 
+  
+  if (missing(depth_lim) | is.null(depth_lim)){
+    depth_lim <- c(round(ceiling(max(this_whale_fine$med_depth / 100, na.rm = TRUE))) * 100,
+                   -75)
+  }
+  
+  
+  
+  if (!interactive){
+    # static colored depth trace
+    dive_trace <- 
+      ggplot(this_whale_fine, mapping = aes(x = start_time_UTC,
+                                            y = med_depth,
+                                            colour = state4, 
+                                            group = tracegroup)) +
+      geom_path(show.legend = TRUE, size = 0.5) +
+      theme_minimal(base_size = static_plot_base_size) +
+      theme(legend.title.position = "left",
+            legend.text = element_text(size = static_plot_base_size),
+            legend.title = element_text(size = static_plot_base_size)) + 
+      guides(colour = guide_legend(nrow = 1)) +
+      theme(legend.position = c(1,1.1),
+            legend.justification = c(1,1)) +
+      ylim(depth_lim) +
+      labs(x = "", y = "Median Depth (m)",
+           title = whale) +
+      scale_color_manual(name = 'State', 
+                         values = c(RColorBrewer::brewer.pal(4, 'Set2')),
+                         drop = FALSE) +
+      geom_ribbon(mapping = aes(x = start_time_UTC, 
+                                ymin = min(depth_lim), ymax = max(depth_lim),
+                                group = dive_cycle_num),
+                  fill = 'grey50', alpha = 0.5,
+                  inherit.aes = FALSE,
+                  data = this_whale_fine |> filter(state %in% paste(c(5:8)))
+      )
+  }else{
+    # interactive depth trace
+    
+    # make the plot
+    dive_trace2 <- ggplot(this_whale_fine, 
+                          mapping = aes(x = start_time_UTC,
+                                        y = med_depth,
+                                        # color by state works in ggplot but NOT ggplotly
+                                        # colour = state4,
+                                        group = tracegroup,
+                                        text = paste("State:", state4)
+                                        )) +
+      geom_path(show.legend = TRUE, size = 0.8) +
+      theme(legend.title.position = "left",
+            legend.text = element_text(size = 10),
+            legend.title = element_text(size = 10)) + 
+      ylim(depth_lim) +
+      xlab("") + ylab("Depth (m)") +
+           ggtitle(whale) +
+      geom_ribbon(mapping = aes(x = start_time_UTC, 
+                                ymin = min(depth_lim), ymax = max(depth_lim),
+                                group = dive_cycle_num),
+                  fill = 'grey50', alpha = 0.5,
+                  inherit.aes = FALSE,
+                  data = this_whale_fine |> filter(state %in% paste(c(5:8)))
+      )
+  }
+  
+  # panel with RL
+  if (sum(!is.na(pull(this_whale_fine, mfas_rl))) == 0){
+    rl_plot <- gf_blank(0 ~ start_time_UTC, data = this_whale_fine) 
+  }else{
+    rl_plot <- gf_point(mfas_rl ~ start_time_UTC, data = this_whale_fine,
+                        size = 0.25, alpha = 0.5, color = 'grey40') |>
+    gf_line(fine_mfa_csel ~ start_time_UTC, data = this_whale_fine)
+  }
+  
+  rl_plot <- rl_plot |> 
+    gf_labs(x = "UTC",
+            y = "RL (dB RMS, cSEL)") |>
+    gf_lims(y = c(50, 185))
+    
+  if (show_explos){
+      rl_plot <- rl_plot |>
+      gf_point(50*fine_impulse_presence ~ start_time_UTC, 
+               shape = 4, size = 0.5, alpha = 0.5, color = 'grey40')
+  }
+  
+  if (show_echo){
+    rl_plot <- rl_plot |>
+      gf_point(50*fine_echo_presence ~ start_time_UTC, 
+               shape = 1, size = 0.5, linewidth = 0.25, alpha = 0.5, color = 'grey40')
+  }
+  
+  if (show_orca){
+    rl_plot <- rl_plot |>
+      gf_point(50*orca_presence ~ start_time_UTC, 
+               shape = 2, size = 2.5, linewidth = 0.25, alpha = 0.5, color = 'grey40')
+  }
+  
+  if (!interactive){
+    rl_plot <- rl_plot +
+      theme_minimal(base_size = static_plot_base_size)
+    my_plot <- dive_trace + rl_plot + 
+      plot_layout(ncol = 1, heights = c(5,2))   
+  }else{
+    # interactive version but no color
+    my_plot <- subplot(ggplotly(dive_trace2), ggplotly(rl_plot),
+            nrows = 2,
+            heights = c(5/8,2/8),
+            margin = 0.05,
+            shareX = TRUE,
+            titleY = TRUE) |>
+      layout(margin = list(t = 50, l = 50))
+  }
+return(my_plot)  
+}
+
+```
+
+```{r}
+whales <- unique(data$whale_ID)
+```
+
+<!-- code note: in current version of Quarto, if you make the plots in a loop, it seems to be impossible to get each one a caption with the correct "Figure SN" auto-label on it... -->
+
+::: {#suppfig-dive-profile1}
+
+```{r}
+w <- 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile2}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile3}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile4}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile5}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile6}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile7}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile8}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile9}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile10}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile11}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile12}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+::: {#suppfig-dive-profile13}
+
+```{r}
+w <- w + 1
+if (knitr::is_html_output()){
+  #   dive_profiles <- htmltools::tagList()
+  #   
+  #   for (w in c(1:length(whales))){
+  # dive_profiles[[w]] <- as_widget(
+  plot_dive_profile(whale = whales[w],
+                    data = data,
+                    interactive = TRUE)
+  # )
+#   }
+#   
+#   dive_profiles
+#   
+}
+```
+
+```{r}
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+if (!knitr::is_html_output()){
+  # for (w in c(1:length(whales))){
+  this_plot <- 
+    plot_dive_profile(whale = whales[w],
+                      data = data,
+                      interactive = FALSE)
+  print(this_plot)
+  # }
+}
+```
+
+Dive depth profile for tag `r whales[w]`, with HHMM state and sound exposure information. Symbols indicate times various sounds were detected on the tag record: open circles for echosounders, Xs for impulsive sounds, and open triangles for orca sounds.
+:::
+
+## Dive Cycle Plots
+
+Below are time-series plots for each whale, showing dive-cycle-scale observations (with "dive cycle number" on x axis). MFAS levels and coarse-scale state (decoded using the fitted HHMM and the Viterbi algorithm) are also indicated.
+
+```{r, dive-cycles-func}
+
+plot_dive_cycles <- function(whale, data){
+  my_cols <- c("grey44", "darkred")
+  # prep data
+  coarse_data_cols <- c('dur_hours', 'fd_dur_hours', 'longest_nf_dur_hours',
+                        'surf_hours', 'click_dur_mins', 'max_depth_km', 'step',
+                        'mfa_bb_rms_max_67', 'mfa_csel')
+  this_whale_coarse <- data |>
+    filter(level == '1' & whale_ID == whale) |>
+    mutate(mfa_csel = if_else(is.na(mfa_csel), 0, mfa_csel)) |>
+    select(whale_ID, dive_cycle_num, level, start_time_UTC,
+           mfa_n_pings, mfa_ping_dur_mean_sec, sonar_before_eoc, 
+           state, state4,
+           all_of(coarse_data_cols)) |>
+    mutate(response = if_else(state %in% paste(c(5:8)), "Variant", "Typical")) |>
+    pivot_longer(cols = all_of(coarse_data_cols),
+                 names_to = "stream",
+                 values_to = "value") |>
+    mutate(stream = case_when(stream == "dur_hours" ~ "Dive Cycle Duration (hr)",
+                              stream == "fd_dur_hours" ~ "Foraging Dive Duration (hr)",
+                              stream == "longest_nf_dur_hours" ~ "Longest Non-Foraging Dive (hr)",
+                              stream == "surf_hours" ~ "Time <5m Depth (hr)",
+                              stream == "click_dur_mins" ~ "Echolocation Click Duration (min)",
+                              stream == "max_depth_km" ~ "Maximum Depth (km)",
+                              stream == "step" ~ "Net Distance Traveled (km)",
+                              stream == "mfa_bb_rms_max_67" ~ "MFAS RL (max; dB re 1uPa RMS)",
+                              stream == "mfa_csel" ~ "MFA cSEL (dB re 1uPa^2*sec)"),
+           stream = fct_relevel(stream,
+                                "Dive Cycle Duration (hr)",
+                                "Net Distance Traveled (km)",
+                                "Foraging Dive Duration (hr)",
+                                "Maximum Depth (km)",
+                                "Echolocation Click Duration (min)",
+                                "Longest Non-Foraging Dive (hr)",
+                                "Time <5m Depth (hr)",
+                                "MFAS RL (max; dB re 1uPa RMS)",
+                                "MFA cSEL (dB re 1uPa^2*sec)"
+           ))
+  # static plot
+  dc_timeseries <- gf_point(value ~ start_time_UTC,
+                            color = ~ response,
+                            data = this_whale_coarse) |>
+    gf_step(group = 1) |>
+    gf_facet_wrap(~stream,
+                  ncol = 1,
+                  scales = "free_y",
+                  strip.position = "top") |>
+    gf_theme(strip.text.x = element_text(hjust = 0, margin=margin(l=0))) |>
+    gf_refine(scale_color_manual("", values = my_cols),
+              facetted_pos_scales(
+                y = list(
+                  stream == "Dive Cycle Duration (hr)" ~ scale_y_continuous(limits = c(0, 20)),
+                  stream == "Net Distance Traveled (km)" ~ scale_y_continuous(limits = c(0, 6.5)),
+                  stream == "Foraging Dive Duration (hr)" ~ scale_y_continuous(limits = c(0, 3)),
+                  stream == "Maximum Depth (km)" ~ scale_y_continuous(limits = c(0, 2)),
+                  stream == "Echolocation Click Duration (min)" ~ scale_y_continuous(limits = c(0, 62)),
+                  stream == "Longest Non-Foraging Dive (hr)" ~ scale_y_continuous(limits = c(0, 2)),
+                  stream == "Time <5m Depth (hr)" ~ scale_y_continuous(limits = c(0, 2)),
+                  stream == "MFAS RL (max; dB re 1uPa RMS)" ~ scale_y_continuous(limits = c(0, 161)),
+                  stream == "MFA cSEL (dB re 1uPa^2*sec)" ~ scale_y_continuous(limits = c(0, 161))
+                )
+              )) |>
+    gf_labs(x = "UTC", y = "",
+            title = whale) |>
+    gf_refine(guides(colour = guide_legend(nrow = 1))) |>
+    gf_theme(legend.position = c(1,1.1),
+             legend.justification = c(1,1))
+  
+  return(dc_timeseries)  
+}
+
+```
+
+::: {#suppfig-dive-cycle1}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle2}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle3}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle4}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle5}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle6}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle7}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle8}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle9}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle10}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle11}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle12}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle13}
+
+```{r}
+#| fig-height: 10
+#| fig-width: 6.5
+# fig-cap: !expr 'paste0(toupper(letters[c(1:length(whales))]), ") Data from tag ", whales, ".")'
+
+w <- 1 + w
+# for (w in c(1:length(whales))){
+    this_plot <- plot_dive_cycles(whale = whales[w],
+                                   data = data)
+    print(this_plot)
+  # }
+```
+
+HHMM input data streams for tag `r whales[w]` at the dive-cycle timescale, with decoded states and MFAS exposure levels.
+:::
+
+::: {#suppfig-dive-cycle-zoom1}
+
+```{r}
+# 10/13 @ 05:58 until 10/14 @ 13:14
+
+z1data <- data |>
+  filter(whale_ID == "Zica-20191012-144029" &
+           start_time_UTC >= lubridate::ymd_hms("2019-10-13 05:58:00") &
+           start_time_UTC <= lubridate::ymd_hms("2019-10-14 13:14:00"))
+
+if (knitr::is_html_output()){
+  dive_profiles <- htmltools::tagList()
+  my_zoomy_plot <- as_widget(plot_dive_profile(whale = "Zica-20191012-144029",
+                                               data = z1data,
+                                               interactive = TRUE))
+  my_zoomy_plot
+}else{
+  my_zoomy_plot <- plot_dive_profile(whale = "Zica-20191012-144029",
+                                     data = z1data,
+                                     interactive = FALSE)
+  print(my_zoomy_plot)
+}
+```
+
+Zoomed-in view of data from tag Zica-20191012-144029, from 10/13/2019 05:58 until 10/14/2019 13:14 UTC.
+:::
+
+::: {#suppfig-dive-cycle-zoom2}
+
+```{r}
+z1data <- data |>
+  filter(whale_ID == "Zica-20191012-145101" &
+           start_time_UTC >= lubridate::ymd_hms("2019-10-13 05:58:00") &
+           start_time_UTC <= lubridate::ymd_hms("2019-10-14 13:14:00"))
+
+if (knitr::is_html_output()){
+  dive_profiles <- htmltools::tagList()
+  my_zoomy_plot <- as_widget(plot_dive_profile(whale = "Zica-20191012-145101",
+                                               data = z1data,
+                                               interactive = TRUE))
+  my_zoomy_plot
+}else{
+  my_zoomy_plot <- plot_dive_profile(whale = "Zica-20191012-145101",
+                                     data = z1data,
+                                     interactive = FALSE)
+  print(my_zoomy_plot)
+}
+```
+
+Zoomed-in view of data from tag Zica-20191012-145101, from 10/13/2019 05:58 until 10/14/2019 13:14 UTC.
+:::
+
+## Variant Timecourse
+
+We can also consider dive-cycle characteristics *of variant dive cycles* as a function of dive-cycle number *within the sequence of several variant dive cycles*. This could help investigate the question of whether there might be differences between "initial" and "later" variant behavior.
+
+```{r}
+resp_timecourse <- data |> 
+  filter(level == 1) |> 
+  mutate(state_diff = ifelse(dive_cycle_num == 1, 
+                              NA,
+                              viterbi - lag(viterbi, n = 1)))
+
+resp_start_ix <- which(resp_timecourse$state_diff == 4)
+resp_timecourse$variant_num <- NA
+resp_timecourse$variant_num[resp_start_ix] <- c(1:length(resp_start_ix))
+
+resp_timecourse <- resp_timecourse |>
+  group_by(whale_ID) |>
+  fill(variant_num, .direction = 'down') |>
+  ungroup() |>
+  mutate(variant_num = ifelse(viterbi_best == 1, NA, variant_num)) |>
+  drop_na(variant_num) |>
+  group_by(whale_ID, variant_num) |>
+  mutate(dc_in_variant = c(1:n())) |>
+  ungroup() |>
+  select(whale_ID, variant_num, dc_in_variant,
+         start_time_UTC, 
+         dur_hours, fd_dur_hours, longest_nf_dur_hours,
+         click_dur_mins, step, surf_hours,
+         mfa_csel) |>
+  # mutate(dc_in_variant = factor(dc_in_variant)) |>
+  pivot_longer(cols = c(dur_hours, fd_dur_hours, longest_nf_dur_hours,
+                        click_dur_mins, step, surf_hours),
+               names_to = "variable",
+               values_to = "value") |>
+  mutate(variable = case_when(variable == "dur_hours" ~ "Dive Cycle\nDuration (hr)",
+                              variable == "fd_dur_hours" ~ "Foraging Dive\nDuration (hr)",
+                              variable == "surf_hours" ~ "Near-Surface\nDuration (hr)",
+                              variable == "click_dur_mins" ~ "Echolocation\nDuration (min)",
+                              variable == "longest_nf_dur_hours" ~ "NF Dive\nDuration (hr)",
+                              variable == "step" ~ "Distance Traveled\n(km)"),
+         variable = fct_relevel(variable, "Dive Cycle\nDuration (hr)",
+                                "Foraging Dive\nDuration (hr)",
+                                "Echolocation\nDuration (min)",
+                                "Near-Surface\nDuration (hr)",
+                                "NF Dive\nDuration (hr)",
+                                "Distance Traveled\n(km)"
+                                ))
+
+```
+
+::: {#suppfig-variant-timecourse}
+
+```{r}
+#| fig-height: 8
+#| fig-width: 6
+gf_point(value ~ dc_in_variant,
+        color = rgb(0.5,0.5,0.5,alpha = 0.2),
+        data = resp_timecourse |>
+          filter(mfa_csel == 0)) |>
+  gf_facet_wrap(~variable,
+                nrow = 6,
+                scales = "free_y") |>
+  gf_point(value ~ dc_in_variant,
+        color = ~mfa_csel,
+        data = resp_timecourse |>
+          filter(mfa_csel > 0) |>
+          arrange(mfa_csel)) |>
+  gf_refine(scale_color_viridis_c(bquote(Cumulative~MFAS~SEL~(dB~re~1*mu*Pa^2*sec)), 
+                        option = "magma", 
+                        direction = -1)) |>
+  gf_theme(theme(legend.position = "bottom",
+                  strip.text = element_text(face="bold", hjust=0))) |>
+  gf_labs(x = "Variant Dive Cycle Number", y = "")
+```
+
+Dive-cycle characteristics of variant dive cycles as a function of dive-cycle number, within the sequence of several variant dive cycles.
+:::
+
+# HHMM Model Validation & Interpretation
+
+## Stationary Distributions
+
+Based on the transition probability matrices, we can compute stationary distributions based on the model, which present the proportion of "time" whales would be expected to spend in each state in the long run. ("Time" because it's the proportion of time-steps, which for the coarse dive-cycle states is not exactly the same as the duration of dive cycles varies.)
+
+```{r}
+SD <- stationary(best_model, covs = data.frame(fine_mfa_csel_scale = seq(from = 0.3, by = 0.1, to = 1),
+                                         mfa_csel_scale = seq(from = 0.3, by = 0.1, to = 1)))
+```
+
+::: {#suppfig-coarse-stationary} 
+
+```{r}
+#| fig-width: 6
+#| fig-height: 4
+#| out-width: 75%
+sd_coarse <- as.data.frame(SD[[1]]$level1) |>
+  mutate(mfa_csel_scale = seq(from = 0.3, by = 0.1, to = 1),
+         mfa_csel = 40 + mfa_csel_scale * (max(data$mfa_csel, na.rm = TRUE) - 40)
+         ) |>
+  rename(Typical = dive_cycle,
+         Variant = exposed_dive_cycle) |>
+  pivot_longer(cols = c(Typical, Variant),
+               names_to = "State",
+               values_to = "Proportion Dive Cycles") |>
+  mutate(`Percent Dive Cycles` = `Proportion Dive Cycles` * 100)
+
+gf_path(`Percent Dive Cycles` ~ mfa_csel,
+        color = ~State, data = sd_coarse) |>
+  gf_theme(legend.position = "top") |>
+  gf_labs(x = bquote(Cumulative~MFAS~SEL~(dB~re~1*mu*Pa^2*sec))) |>
+  gf_lims(y = c(0, 100))
+```
+
+Stationary state distribution at the dive-cycle scale. The values show the expected proportion of dive cycles spent in each state if the MFAS exposure level was perpetually at a certain value.
+:::
+
+::: {#suppfig-fine-stationary} 
+
+```{r}
+#| fig-width: 6
+#| fig-height: 4
+sd_fine <- bind_rows(as.data.frame(SD[[1]]$level2$dive_cycle) |> 
+                       rename_with(.fn = function(x) str_replace_all(x, pattern = "b", replacement = fixed("State "))),
+                     as.data.frame(SD[[1]]$level2$exposed_dive_cycle) |> 
+                       rename_with(.fn = function(x) str_replace_all(x, pattern = "e", replacement = fixed("State ")))
+) |>
+  mutate(mfa_csel_scale = rep.int(seq(from = 0.3, by = 0.1, to = 1), 2),
+         `Dive Cycle` = rep(c("Typical", "Variant"), each = 8),
+         mfa_csel = 40 + mfa_csel_scale * (max(data$mfa_csel, na.rm = TRUE) - 40)
+         ) |>
+  pivot_longer(cols = starts_with("State"),
+               names_to = "State",
+               values_to = "Proportion of Time") |>
+  mutate(`Percent of Time` = `Proportion of Time` * 100)
+
+gf_path(`Percent of Time` ~ mfa_csel,
+        color = ~State, data = sd_fine) |>
+  gf_facet_wrap(~`Dive Cycle`, ncol = 2) |>
+  gf_theme(legend.position = "top") |>
+  gf_labs(x = bquote(Cumulative~MFAS~SEL~(dB~re~1*mu*Pa^2*sec))) |>
+  gf_lims(y = c(0, 100))
+```
+
+Stationary state distribution at the dive-cycle scale. The values show the expected proportion of dive cycles spent in each state if the MFAS exposure level was perpetually at a certain value.
+:::
+
+
+## Lag plots
+These plots may sometimes help verify the number of states in the data, as discussed in [Lawler *et al.* 2019](https://doi.org/10.1007/s13253-019-00366-2) and [Sidrow *et al.* 2022](https://onlinelibrary.wiley.com/doi/10.1002/cjs.11673) 
+
+```{r}
+lag_plot <- function(data, variable){
+  this_var <- data |>
+    filter(level == "2") |>
+    pull(variable)
+  ggplot(mapping = aes(x = this_var, y = lag(this_var))) +
+           geom_density_2d_filled(na.rm = TRUE) +
+    xlab("") + ylab("") + ggtitle(variable) +
+    theme(legend.position = "none")
+}
+```
+
+::: {#suppfig-lag-msa}
+
+```{r}
+lag_plot(data, variable = "pct90_msa") +
+  lims(x = c(0,1), y = c(0,1))
+```
+
+Lag plot for 90th percentile of MSA.
+:::
+
+::: {#suppfig-lag-stroke}
+
+```{r}
+lag_plot(data, variable = "strokes_per_sec") +
+  lims(x = c(0,1), y = c(0,1)) 
+```
+
+Lag plot for fluke stroke rate.
+:::
+
+::: {#suppfig-lag-head}
+
+```{r}
+lag_plot(data, variable = "std_head") +
+  lims(x = c(0,2), y = c(0,2)) 
+```
+
+Lag plot for circular standard deviation of heading.
+:::
+
+## Model Pseudoresiduals
+
+::: {#suppfig-pseudores}
+
+```{r}
+#| fig-width: 9
+#| fig-height: 18
+
+plotPR(best_model)
+```
+
+HHMM pseudo-residuals.
+:::
+
+{{< include _sim-results.qmd >}}

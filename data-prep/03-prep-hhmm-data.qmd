@@ -1,0 +1,673 @@
+---
+title: "Prepare dataset to fit HHMMs"
+format: html
+editor: visual
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(ggformula)
+library(momentuHMM)
+
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE,
+                      message = FALSE,
+                      fig.width = 7.5, fig.height = 6)
+theme_set(theme_minimal(base_size = 8))
+
+if (sum(grepl("Mac", Sys.info()))){
+  ncpath <- "/Users/sld33/Dropbox/FBdata"
+}else{
+  ncpath <- "C:/Users/stacy/Dropbox/FBdata"
+}
+awbs <- readRDS(file.path(ncpath, 'all_whales_both_scales25.RDS'))
+```
+
+This file includes some data checks and formatting in advance of fitting HHMMs. It comes in the process after `process-hhmm-tagdata-2025.Rmd`.
+
+# Measured RL with Distance
+
+## Overview
+
+We do not have NUWC model output for all the later SMRT tag deployments, so there will be many dive cycles and MFAS exposures for which model-based distance estimates are not available now.
+
+```{r}
+#| echo: false
+#| warning: false
+
+awbs |> 
+  filter(hierarchy_level == '1' & !coarse_RL_AND_distance & mfa_n_pings > 0) |> 
+  select(whale_ID, start_time_UTC, mfa_n_pings, coarse_min_km_from_fine_RL_AND_distance, 
+         coarse_mfa_bb_rms_grand_max, start_sec, end_sec
+         ) |>
+  rename(source_whale_distance = coarse_min_km_from_fine_RL_AND_distance,
+         RL = coarse_mfa_bb_rms_grand_max) |>
+    mutate(RL = round(RL, digits = 1)) |> 
+  arrange(start_time_UTC) |> 
+  DT::datatable(options = list(pageLength = 15))
+```
+
+There are also *many* instances where we have model outputs for distance/RL, but no corresponding tag measured RLs (in many cases, the modeled RLs are very low). Those observations will also not be included in the model.
+
+Note that the graph below of course only includes tagouts for which RL modeling outputs are available.
+
+```{r}
+#| echo: false
+#| warning: false
+
+gf_point(fine_mfa_bb_rms_max ~ fine_model_source_whale_distance_min_km, data = awbs, color = ~fine_model_results_valid) |>
+  gf_labs(title = 'Data shown is for 5-minute windows (fine scale)',
+          x = 'Minimum Source-Whale Distance (km)\nfrom NUWC modeling',
+          y = 'Measured MFAS RL (dB RMS, broadband)\nfrom tag') |>
+  gf_theme(scale_color_discrete('Valid model results?'))
+
+my_tab <- mosaic::tally(!is.na(fine_mfa_bb_rms_max) ~ !is.na(fine_model_source_whale_distance_min_km), data = awbs)
+names(dimnames(my_tab)) <- c('RL Measured on Tag', 'Source-whale Distance Reported')
+pander::pander(ftable(my_tab))
+
+my_tab2 <- mosaic::tally(!is.na(fine_mfa_bb_rms_max) ~ fine_model_results_valid, data = awbs)
+names(dimnames(my_tab)) <- c('RL Measured on Tag', 'Valid Modeled RLs Reported')
+pander::pander(ftable(my_tab))
+```
+
+## Data
+
+### Which Tags?
+
+The dataset for this model fit includes only whales that have measured (tag-based) MFAS RLs recorded.
+
+### Inclusion/Exclusion based on Measured RLs
+
+Any foraging dive cycle where tag-based RLs were measured but the corresponding source-whale distance is not known **will not contribute to the likelihood of the fitted model** -- so, the data from that foraging dive cycle will effectively be excluded from analysis. Similarly, 5-minute windows with measured RLs that don't match up with modeled RL output/distance will also not contribute to the likelihood.
+
+*Technical note: Since `momentuHMM` imputes missing values in covariates, the criterion above will be enforced by making the dive-cycle duration NA and the presence-absence of clicking NA for times when we don't have BOTH measured RLs and source-whale distance.*
+
+```{r, rl-dist-data}
+rl_data <- awbs |>
+  filter(whale_ID %in% c('Zica-20191012-144029',
+                         'Zica-20191012-145101',
+                         'Zica-20191111-94810',
+                         'Zica-20191117-195993',
+                         'Zica-20211112-94819',
+                         'Zica-20211113-195993',
+                         'Zica-20220112-195994',
+                         'Zica-20230518-233391',
+                         'Zica-20230519-232950', 
+                         'Zica-20230723-233394', 
+                         'Zica-20230723-233395', 
+                         'Zica-20240227-233396', 
+                         'Zica-20240227-240128'))
+
+# which dive cycles DO HAVE acoustic data?
+# but if there is ONE INTERNAL DIVE without it (not at end of record, from data corruption)
+# keep it in as NA to keep sequence intact
+# this was issue in past, current data has no internal NAs in click_dur
+# need to ensure that dives AFTER the last dive cycle are not included as dive cycle duration...where is the place to cut off data w/no acoustics -- is it here, or is it in the pre-processing? Make sure it's done right!!
+acous_data_dc <- rl_data |>
+  filter(hierarchy_level == '1') |>
+  select(whale_ID, dive_cycle_num, click_dur) |>
+  mutate(later_clicks = 0)
+
+for (dc in c(1:nrow(acous_data_dc))){
+  this_whale <- acous_data_dc$whale_ID[dc]
+  acous_data_dc$later_clicks[dc] <- sum(
+    !is.na(acous_data_dc[c(dc:nrow(acous_data_dc)),] |>
+            filter(whale_ID == this_whale) |>
+             pull(click_dur)
+           )
+    )
+}
+
+# do this instead of drop_na(click_dur) as it will keep any click_dur NAs that are FOLLOWED by more acous data from same whale
+acous_data_dc <- acous_data_dc |>
+  # in current dataset this doesn't actually filter anything
+  filter(later_clicks >= 1 | !is.na(click_dur)) |>
+  select(-later_clicks, -click_dur)
+
+# keep rows of rl_data whose whale_ID and dive_cycle_num match acous_data_dc
+rl_data <- inner_join(rl_data, acous_data_dc) |>
+  arrange(whale_ID, dive_cycle_num, start_sec)
+
+# for just these whales, check
+na_dur_sec <- sum(is.na(rl_data$dur_sec) & rl_data$hierarchy_level == '1')
+n_mfa_dc <- sum(!is.na(rl_data$dur_sec) & rl_data$hierarchy_level == '1' & !is.na(rl_data$click_dur))
+n_dc <- sum(rl_data$hierarchy_level == '1')
+n_5 <- sum(rl_data$hierarchy_level == '2')
+```
+
+Considering only these whales, and excluding the periods where acoustic data was not recorded, we have data on `r n_dc` dive cycles including `r n_5` 5-minute windows, of which data is missing for `r na_dur_sec` dive cycles (for example, because the dive cycle was ongoing when the tag came off).
+
+*IF* modeling effect of source-whale distance, or comparing models with and without distance, we also have to exclude additional time-periods -- when RLs were measured but no corresponding model results are available - from contributing to the HHMM likelihoods.
+
+```{r}
+rl_dist_data <- rl_data |>
+  # if measured RLs but NOT also distance for a certain dive cycle, exclude it from likelihood by making its duration NA
+  mutate(dur_sec = ifelse(!is.na(coarse_mfa_bb_rms_grand_max) &
+                            is.na(coarse_mfa_bb_rms_grand_max_from_fine_RL_AND_distance),
+                           NA,
+                           dur_sec),
+         # if measured RLs but NOT also distance for a certain 5-min window, exclude from LL by making NA
+         clicks_present = ifelse(!is.na(fine_mfa_bb_rms_max) &
+                                   !fine_RL_AND_distance,
+                                  NA,
+                                  clicks_present))
+# for just these whales, check
+na_dur_sec <- sum(is.na(rl_dist_data$dur_sec) & rl_dist_data$hierarchy_level == '1')
+n_dc <- sum(rl_dist_data$hierarchy_level == '1')
+n_mfa_dc <- sum(rl_dist_data$hierarchy_level == '1' & 
+                  !is.na(rl_dist_data$coarse_mfa_bb_rms_grand_max_from_fine_RL_AND_distance))
+n_5 <- sum(rl_dist_data$hierarchy_level == '2' & !is.na(rl_dist_data$clicks_present))
+```
+
+This would reduce the size of the dataset further, leaving us with `r n_dc` dive cycles, of which data is *now missing* for `r na_dur_sec` dive cycles. Of the dive cycles with (non-missing) data, `r n_mfa_dc` include sonar exposure. There are now `r n_5` 5-minute windows with data that will be used.
+
+*Note that in the main dataset we save, we will NOT remove these rows -- they could be included in a model with RL only. So at the point of modeling we'll need to make another version of the data with these NAs added.*
+
+### Inclusion/Exclusion based on Modeling
+
+There are many 5-minute windows for which model results are available (source-whale distance and RL), but there is *not* a corresponding RL measured on the tag.
+
+However, unlike the cases where we have measured RLs and no model results, we are *less* confident these times should really be considered "exposed" to MFAS, as no sounds were detectable on the tag.
+
+So, we likely do *not* want to exclude all such 5-minute windows and dive cycles from contributing to the model likelihood! By leaving them in, we are effectively considering them to be "unexposed" times.
+
+Technical note: `momentuHMM` imputes missing values in covariates. We will want to treat times that have source-whale distance values and NO measured RLs as "no exposure" so we should (at this point) change their source-whale distance value to NA to match all the unexposed times.
+
+```{r}
+# to check before and after, to verify afterward there are no cases RL_AND_distance FALSE and km non-NA:
+mosaic::tally(fine_model_source_whale_distance_min_km ~ fine_RL_AND_distance,
+              data = rl_data |> filter(hierarchy_level == '2'))
+mosaic::tally(coarse_model_source_whale_distance_min_km ~ coarse_RL_AND_distance,
+              data = rl_data |> filter(hierarchy_level == '1'))
+
+rl_data <- rl_data |>
+  # if measured RLs but NOT also distance for a certain dive cycle, exclude it from likelihood by making it NA
+  mutate(across(starts_with('fine_model_source_whale_distance'),
+                ~ifelse(fine_RL_AND_distance,
+                  .x,
+                  NA)),
+         across(starts_with('coarse_model_source_whale_distance'),
+                ~ifelse(coarse_RL_AND_distance,
+                        .x,
+                        NA)))
+```
+
+### Missing Depth data for Zica-20230723-233395
+
+This whale had some malfunctions in the depth sensor resulting in *a lot* of missing data during the bottom phase of deep dives. So the max depth should be NA for *all* dive cycles. Other sensors were not affected to our knowledge.
+
+```{r}
+rl_data <- rl_data |>
+  mutate(max_depth = if_else(whale_ID == "Zica-20230723-233395" &
+                               hierarchy_level != "2",
+                             NA,
+                             max_depth))
+```
+
+### Additional Variables and Data Prep
+
+We will compute a few derived variables in order to improve performance of the model fitting algorithms.
+
+#### Transformed source-whale distance
+
+For the source-whale distance covariate, we have some challenging choices to make. This covariate has no value (it's missing) when there is *no* source operating. But we can't just assign a value of 0 in the case of "no exposure", because 0 distance is a value for which we expect the most intense response. One option is to transform the distance values so that *larger* values of the new covariate mean a *closer* source, and 0 means no source is present.
+
+We will compute several options (**D** is the *minimum* source-whale distance in 10s of kilometers observed in the time period):
+
+-   `tdist1` = $\frac{1}{\text{D}}$
+
+-   `tdist2` = $\text{D}^{-1/2}$
+
+-   `tdist3` = $\text{D}^{-2}$
+
+-   `tdist4` = $e^{-\text{D}}$
+
+-   `tdist5` = $10^{-\text{D}}$
+
+*Technical Note: we have used 10s of km in order to scale the `tdist` values so they are not too tiny or huge numerically (with max values up to about 5 or about 50 depending on the transformation).*
+
+```{r}
+# ideas for transformations for distance variable so that large values indicate "source atop whale"
+
+w <- tibble(km = c(0:200) / 100,
+                `1/distance` = 1/km,
+                `distance ^ (-1/2)` = km^(-1/2),
+                `distance ^ (-2)` = km^(-2),
+                `e^(-distance)` = exp(-km),
+                `10^(-distance)` = 10^(-km)) |>
+  pivot_longer(cols = !km,
+               names_to = 'quantity',
+               values_to = 'value')
+                
+gf_point(value ~ km*100, data = w) |>
+  gf_line(alpha = 0.5, size = 0.5) |>
+  gf_facet_wrap(~quantity, scales = "free_y") |>
+  gf_labs(x = "Source-Whale Distance (km)",
+          y = "Transformed Distance",
+          title = "Possible Transformations for Distance Data") 
+
+# hopefully we can compute several of these and compete them as covariates.
+```
+
+```{r}
+#| label: derived-covs
+
+rl_data <- rl_data |>
+  mutate(across(contains('model_source_whale_distance_m'),
+                ~1 / (.x / 100),
+                .names = '{str_split_i(.col, pattern = fixed("_"), i = 1)}_tdist1_{str_split_i(.col, pattern = fixed("_"), i = -2)}'),
+         across(contains('model_source_whale_distance_m'),
+                ~(.x / 100)^(-1/2),
+                .names = '{str_split_i(.col, pattern = fixed("_"), i = 1)}_tdist2_{str_split_i(.col, pattern = fixed("_"), i = -2)}'),
+         across(contains('model_source_whale_distance_m'),
+                ~(.x / 100)^(-2),
+                .names = '{str_split_i(.col, pattern = fixed("_"), i = 1)}_tdist3_{str_split_i(.col, pattern = fixed("_"), i = -2)}'),
+         across(contains('model_source_whale_distance_m'),
+                ~exp(-(.x / 100)),
+                .names = '{str_split_i(.col, pattern = fixed("_"), i = 1)}_tdist4_{str_split_i(.col, pattern = fixed("_"), i = -2)}'),
+         across(contains('model_source_whale_distance_m'),
+                ~10^(-(.x / 100)),
+                .names = '{str_split_i(.col, pattern = fixed("_"), i = 1)}_tdist5_{str_split_i(.col, pattern = fixed("_"), i = -2)}'),
+         ) 
+
+# if there is NO exposure make the tdists all 0
+rl_data <- rl_data |>
+  mutate(across(contains('_tdist'),
+                ~ifelse(is.na(.x), 0, .x)))
+```
+
+#### RL when MFAS is present, but undetectable on tag audio
+
+We also need to consider what an RL of "zero" means. Here we create an RL variable which will be:
+
+-   0 when there is NO MFAS exposure
+
+-   67 when there *were* MFAS pings, but their SNR was not high enough to measure a level.
+
+```{r}
+# label: add-rl-for-lo-snr-pings
+
+# replace NAs where there WERE detected pings based on the audit, with 67
+rl_data <- rl_data |>
+  mutate(across(starts_with('mfa_bb_'),
+                ~ifelse(is.na(.x) & mfa_n_pings > 0, 
+                        67,
+                        .x),
+                .names = '{.col}_67'),
+         across(starts_with('fine_mfa_bb_'),
+                ~ifelse(is.na(.x) & mfa_n_pings > 0, 
+                        67,
+                        .x),
+                .names = '{.col}_67'))
+
+n_fill67_fine <- sum(is.na(rl_data$fine_mfa_bb_rms_max)) - 
+  sum(is.na(rl_data$fine_mfa_bb_rms_max_67))
+n_fill67_dc <- sum(is.na(rl_data$mfa_bb_rms_max)) - 
+  sum(is.na(rl_data$mfa_bb_rms_max_67))
+
+# now replace remaining NAs with 0
+rl_data <- rl_data |>
+  mutate(across(contains('_67'),
+                ~ifelse(is.na(.x), 0, .x)))
+```
+
+We have added in `n_fill67_dc` 67s at the coarse (dive-cycle) scale and `n_fill67_fine` at the fine (5-minute) scale.
+
+### Cumulative SEL
+
+The cSEL values in the dataset now are cumulated over the interval they are reported for.
+
+For level 1 (dive cycle) that's what we want.
+
+For level 2 (5 minute intervals) we would like to cumulate over the dive cycle.
+
+```{r}
+rl_data <- rl_data |>
+  group_by(whale_ID, dive_cycle_num) |>
+  mutate(
+    fine_mfa_csel_noNA = ifelse(is.na(fine_mfa_csel), 0, fine_mfa_csel),
+    fine_mfa_csel_tosum = 10^(fine_mfa_csel_noNA/10),
+    # if csel in 5 min bin is 0 then on this scale it will be 1, should be 0
+    fine_mfa_csel_tosum = if_else(fine_mfa_csel_tosum == 1, 0, fine_mfa_csel_tosum),
+    fine_mfa_cumsum = cumsum(fine_mfa_csel_tosum),
+    fine_mfa_csel = 10*log10(fine_mfa_cumsum),
+    fine_mfa_csel = ifelse(is.infinite(fine_mfa_csel), NA, fine_mfa_csel)
+  ) |>
+  select(-fine_mfa_csel_noNA,
+         -fine_mfa_csel_tosum,
+         -fine_mfa_cumsum) |>
+  ungroup()
+```
+
+Right now SEL values include NAs. They should be 0s (or something...they are the times with no MFAS).
+
+```{r}
+rl_data |> filter(hierarchy_level == "2") |> pull(fine_mfa_csel) |> is.na() |> sum()
+```
+
+```{r}
+rl_data |> filter(hierarchy_level == "1") |> pull(mfa_csel) |> is.na() |> sum()
+```
+
+```{r}
+rl_data[rl_data$hierarchy_level == "2" & is.na(rl_data$fine_mfa_csel),
+        "fine_mfa_csel"] <- 0
+
+rl_data[rl_data$hierarchy_level == "1" & is.na(rl_data$mfa_csel),
+        "mfa_csel"] <- 0
+```
+
+```{r}
+rl_data |> filter(hierarchy_level == "2") |> pull(fine_mfa_csel) |> is.na() |> sum()
+```
+
+```{r}
+rl_data |> filter(hierarchy_level == "1") |> pull(mfa_csel) |> is.na() |> sum()
+```
+
+At hierarchy level 2i, all data streams are NA, but we don't want to risk covariates getting "filled in" later so make them all 0.
+
+```{r}
+rl_data <- rl_data |>
+  mutate(across(c(mfa_bb_rms_max_67,
+                mfa_n_pings,
+                mfa_ping_dur_mean_sec,
+                mfa_csel,
+                fine_mfa_bb_rms_max_67,
+                fine_mfa_n_pings,
+                fine_mfa_ping_dur_mean_sec,
+                fine_mfa_csel,
+                sonar_before_eoc),
+         function(x) ifelse(hierarchy_level == "2i", 
+                        0,
+                        x)))
+
+# make the "fine" ones 0 when it's level 1
+rl_data <- rl_data |>
+  mutate(across(c(
+                fine_mfa_bb_rms_max_67,
+                fine_mfa_n_pings,
+                fine_mfa_ping_dur_mean_sec,
+                fine_mfa_csel),
+         function(x) ifelse(hierarchy_level == "1", 
+                        0,
+                        x)))
+
+# make the "coarse" ones 0 when it's level 2
+rl_data <- rl_data |>
+  mutate(across(c(
+                mfa_bb_rms_max_67,
+                mfa_n_pings,
+                mfa_ping_dur_mean_sec,
+                mfa_csel,
+                sonar_before_eoc),
+         function(x) ifelse(hierarchy_level == "2", 
+                        0,
+                        x)))
+```
+
+### "Last" dive cycles
+
+In the *last* dive cycle for which data is available, we know that there is a recorded echolocation click duration. The dive duration will be NA if the tag is off the whale before the end of the foraging dive.
+
+However, if there is *not* a subsequent foraging dive, then the following dive-cycle variables must be NA also since we don't have data spanning until the end of the dive cycle:
+
+- `dur_sec`, 
+- `longest_dur_sec`,
+- `longest_nf_dur_sec`,
+- `nshal`, # n shallow dives
+- `surf_sec`,
+- `nbreath`, # from sensor not manual, there's also breath_count_manual
+- `med_speed`, 
+- `med_depth`,
+- `path`, # in km
+-  `step`, # in km
+
+```{r}
+whales <- unique(rl_data$whale_ID)
+rl_datas <- list()
+for (w in c(1:length(whales))){
+  this_whale <- whales[w]
+  this_data <- filter(rl_data, whale_ID == this_whale)
+  last_dc_num <- max(this_data$dive_cycle_num)
+  this_data[this_data$dive_cycle_num == last_dc_num, 
+            c("dur_sec",
+              "longest_dur_sec",
+              "longest_nf_dur_sec",
+              "nshal",
+              "surf_sec",
+              "nbreath",
+              "path",
+              "step")] <- NA
+  rl_datas[[w]] <- this_data
+}
+
+rl_data <- bind_rows(rl_datas)
+```
+
+Next, we will select *only* the variables that will be used in this analysis.
+
+```{r}
+#| label: select-hhmm-vars
+
+hhmm_meta_vars <- c('whale_ID', 
+                    'dive_cycle_num',
+                    'hierarchy_level',
+                    'start_time_UTC')
+
+hhmm_fine_vars <- as.character(expression(med_depth,
+                                          std_pitch,
+                                          std_roll, 
+                                          std_head, 
+                                          pct90_msa, 
+                                          wiggles, 
+                                          med_speed, 
+                                          med_vv,
+                                          strokes_per_sec, 
+                                          rms_stroke, 
+                                          clicks_present, 
+                                          nonfocal_clicks_present,
+                                          # fine scale RL
+                                          fine_model_sonar_type, 
+                                          fine_model_source_whale_distance_min_km,
+                                          fine_model_rl_max_depth, # depth-matched
+                                          fine_mfa_n_pings,
+                                          fine_mfa_ping_dur_mean_sec,
+                                          fine_mfa_bb_rms_max_67,
+                                          fine_mfa_csel, # cumulative over dive cycle
+                                          fine_explosive_n_pings,
+                                          fine_explosive_bb_rms_max,
+                                          fine_echosounder_n_pings,
+                                          fine_echosounder_bb_rms_max))
+
+hhmm_dc_vars <- as.character(expression(
+  dur_sec, 
+  fd_dur_sec,
+  longest_dur_sec,
+  longest_nf_dur_sec,
+  bathy, # mean bathymetry in m within 2.5km at foraging dive cycle LAST location
+  max_depth, 
+  nshal, # n shallow dives
+  surf_sec,
+  nbreath, # from sensor not manual, there's also breath_count_manual
+  # fd_bathy, # DO NOT HAVE CURRENTLY
+  # fd_bathy_slope,  # DO NOT HAVE CURRENTLY
+  # med_speed, 
+  # med_depth,
+  path, # in km/h
+  step, # in km/h
+  # turn_angle_rad, # DO NOT HAVE CURRENTLY - hard to decide how to compute w/irreg steps
+  # solar_phase_initial, # DO NOT HAVE CURRENTLY
+  # lunar_phase, # DO NOT HAVE CURRENTLY
+  # quarter_of_year, # DO NOT HAVE CURRENTLY
+  # FORAGING CLICKS & BUZZES
+  # n_clicks, # DO NOT HAVE CURRENTLY
+  click_dur, # seconds 
+  click_start_depth, 
+  click_end_depth, 
+  # dive_to_click1_sec, # DO NOT HAVE CURRENTLY
+  # n_nonfocal_clicks, # DO NOT HAVE CURRENTLY
+  num_buzzes, 
+  buzz_depth_median, 
+  # buzz_depth_iqr, # DO NOT HAVE CURRENTLY
+  buzz_dur_median,
+  # RL related
+  coarse_model_sonar_type, 
+  coarse_model_source_whale_distance_min_km,
+  coarse_tdist1_min,
+  coarse_tdist2_min,
+  coarse_tdist3_min,
+  coarse_tdist4_min,
+  # coarse_model_rl_max, # not depth-matched
+  coarse_model_rl_grand_max_depth, # max of all depth-matched 5-minute modeled RLs
+  mfa_n_pings,
+  mfa_ping_dur_mean_sec,
+  mfa_bb_rms_max_67,
+  mfa_csel, # cumulative SEL over dive cycle
+  sonar_before_eoc,
+  first_mfas_sec, 
+  last_mfas_sec, 
+  # prop_fd_after_mfas, 
+  # prop_fd_after_last_mfas, 
+  # prop_fd_mfas_overlap, 
+  # prop_dc_mfas_overlap,
+  anthro_presence,
+  echo_presence,
+  explos_presence
+  ))
+
+hhmm_data <- rl_data |>
+  select(all_of(hhmm_meta_vars), all_of(hhmm_dc_vars), all_of(hhmm_fine_vars))
+  
+```
+
+
+#### Unit Conversions
+
+-   Convert variables measured in seconds to hours: dive cycle duration, dive cycle surface duration; or minutes: clicking duration <!-- - `fd_bathy_slope` to radians -->
+
+```{r}
+hhmm_data <- hhmm_data |>
+  mutate(dur_hours = dur_sec / 3600,
+         fd_dur_hours = fd_dur_sec / 3600,
+         longest_dur_hours = longest_dur_sec / 3600,
+         longest_nf_dur_hours = ifelse(longest_nf_dur_sec == 0,
+                                       NA,
+                                       longest_nf_dur_sec / 3600),
+         surf_hours = surf_sec / 3600,
+         click_dur_mins = click_dur / 60)
+```
+
+#### Match Data Variables to PDF Support
+
+We also make the following adjustments:
+
+-   Check for stray 0s or negative values in variables to be modeled with distributions whose support is strictly non-negative: `med_speed` `med_depth`, `gps_dive_cycle_path_km`
+
+```{r, message = FALSE}
+bump_zeroes <- function(data, var){
+  if (sum(pull(data, var) == 0, na.rm = TRUE)){
+  data <- data |>
+  mutate(var = ifelse(var == 0, var + 1e-10, var))
+  }else{
+    message(paste('no zeroes found in ', var))
+  }
+}
+
+bump_zeroes(hhmm_data, 'med_speed')
+bump_zeroes(hhmm_data, 'med_depth')
+bump_zeroes(hhmm_data, 'path')
+bump_zeroes(hhmm_data, 'step')
+```
+
+#### Make scaled versions of some covariates
+
+```{r}
+hhmm_data <- hhmm_data |>
+mutate(sonar_before_eoc = as.numeric(sonar_before_eoc),
+         max_depth_km = max_depth / 1000,
+         mfa_bb_rms_max_67_before_eoc = ifelse(sonar_before_eoc == 1, mfa_bb_rms_max_67, 0),
+         mfa_bb_rms_max_scale = (mfa_bb_rms_max_67 - 40) / max((mfa_bb_rms_max_67 - 40), na.rm = TRUE),
+         fine_mfa_bb_rms_max_scale = (fine_mfa_bb_rms_max_67 - 40) / max((fine_mfa_bb_rms_max_67 - 40), na.rm = TRUE),
+         mfa_csel_scale = (mfa_csel - 40) / max((mfa_csel - 40), na.rm = TRUE),
+         fine_mfa_csel_scale = (fine_mfa_csel - 40) / max((fine_mfa_csel - 40), na.rm = TRUE),
+         across(contains("_scale"), function(x) ifelse(x < 0, 0, x)),
+         mfas_presence = ifelse(mfa_n_pings >0, 1, 0),
+         across(contains("_presence"), as.numeric),
+         step = if_else(step > 100, NA, step))
+```
+
+#### Meeting `momentuHMM` package requirements
+
+We are using the package `momentuHMM` for model fitting, and it also has a few particular requirements:
+
+-   We need a tagout-ID variable that is a **numeric** R variable (we generate it from our tagout IDs, already present in the `whale_ID` variable)
+
+-   We need the data to be stored as a `data.frame` and *not* a `tibble`
+
+-   The variable indicating the level of the hierarchy of each obs must be called `level`
+
+-   MAYBE level 1 (AND 2???) data streams must be NA for level 2i - not totally clear in the vignettes as they often have time-scales with no input data streams.
+
+```{r}
+#| label: generate-momentuHMM-req-vars
+
+hhmm_data <- hhmm_data |>
+  # momentuHMM requires animal IDs to be numeric!
+  # the factor() is to arrange them in alpha order = time order
+  mutate(ID = as.numeric(factor(whale_ID))) |>
+  rename(level = hierarchy_level) # momentuHMM requires this name
+
+my_covs <- c("mfa_csel",
+             "mfas_presence",
+             "mfa_bb_rms_max_scale",
+             "prop_fd_mfas_overlap",
+             "prop_dc_mfas_overlap",
+             "mfa_csel_scale",
+             "sonar_before_eoc",
+             "fine_mfa_bb_rms_max_scale",
+             "fine_mfa_csel",
+             "fine_mfa_csel_scale")
+
+# and make all the input streams NA for level 2i...like
+hhmm_data <- hhmm_data |>
+  mutate(across(c(-whale_ID, -ID, -level, -dive_cycle_num, -start_time_UTC,
+                  -any_of(my_covs)),
+                ~ifelse(level == '2i', NA, .x)))
+
+# corrected in process-hhmm
+# hhmm_data <- hhmm_data  |>
+#   # to avoid error: Error in prepData.hierarchical(data, type, coordNames, covNames, spatialCovs,  : 
+#   # data$level invalid for individual 6: level for first observation must be '1' and level for last observation must be '2'
+# 
+#   # so must remove dive cycles where there is no data at the 5-minute scale or acoustic data ends during this dive cycle
+#   filter( (ID == 1 & dive_cycle_num < 37) |
+#             (ID == 2 & dive_cycle_num < 42) |
+#             (ID == 3 & dive_cycle_num < 39) |
+#             (ID == 4 & dive_cycle_num < 2) |
+#             (ID == 5 & dive_cycle_num < 52) |
+#             (ID == 6 & dive_cycle_num < 50) |
+#             (ID == 7 & dive_cycle_num < 51) |
+#             (ID == 8 & dive_cycle_num < 84) |
+#             (ID == 9 & dive_cycle_num < 80) |
+#             (ID == 10 & dive_cycle_num < 20) |
+#             (ID == 11 & dive_cycle_num < 18) |
+#             (ID == 12 & dive_cycle_num < 66))  
+
+
+hhmm_data <- hhmm_data |>
+  # data must be stored as a data.frame NOT a tibble
+  as.data.frame()
+
+```
+
+### Save RDS file for modeling
+
+This RDS file will be loaded in and ready-to-go for fitting HHMMs.
+
+```{r}
+saveRDS(hhmm_data, file = file.path(ncpath, 'hhmm_smrt_data_aug_2025.RDS'))
+```

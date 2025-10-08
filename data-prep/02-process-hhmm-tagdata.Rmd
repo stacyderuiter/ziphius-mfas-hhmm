@@ -1,0 +1,854 @@
+---
+title: "Dataset for HHMMs: Process Tag NC files, Add RL data, Get fine- and coarse-scale data"
+output:
+  pdf_document: default
+  html_document: default
+date: "2024-01-22"
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(FBtagtools)
+library(ggformula)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+In the HHMM workflow, this step is done after the pre-processing to get fine and coarse scale datasets in matlab. (Files `process-coarse-scale.m` and `process-fine-scale.m`)
+
+
+#  Directory Setup
+
+```{r}
+if (sum(grepl("Mac", Sys.info()))){
+pingpath <- "/Users/sld33/Dropbox/FBdata/RLs"
+boomin_pingpath <- "/Users/sld33/Dropbox/BOOMIN/RLs"
+ncpath <- "/Users/sld33/Dropbox/FBdata"
+droppath <- "/Users/sld33/Dropbox/"
+}else{
+  ncpath <- "C:/Users/stacy/Dropbox/FBdata"
+  pingpath <- "C:/Users/stacy/Dropbox/FBdata/RLs"
+  boomin_pingpath <- "C:/Users/stacy/Dropbox/BOOMIN/RLs"
+  droppath <- "C:/Users/stacy/Dropbox"
+}
+
+
+aepath <- paste0(ncpath, '/ae-files')
+bathypath <- paste0(droppath, "/FBtagtools/Resources-Seafloor")
+rldirA <- paste0(ncpath, "/rl-modeling-results/FB_results20210709")
+rldirB <- paste0(ncpath, "/rl-modeling-results/Modelling-20220720")
+rl_model_meta_files <- c(rldirA, rldirB)
+
+rlfiles <- paste0(pingpath, c('/Zica-20191012-144029.csv',
+             '/Zica-20191012-145101.csv',
+             '/Zica-20191111-94810.csv',
+             '/Zica-20191117-195993.csv',
+             '/Zica-20211112-94819.csv',
+             '/Zica-20211113-195993.csv',
+             '/Zica-20220112-195994.csv',
+             '/Zica-20230518-233391.csv',
+             '/Zica-20230519-232950.csv',
+             '/Zica-20230723-233394.csv', 
+             '/Zica-20230723-233395.csv',
+             '/Zica-20240227-233396.csv',
+             '/Zica-20240227-240128.csv'))
+boomin_rlfiles <- paste0(boomin_pingpath, c("/Zica-20230723-233394_RLs_bb.csv",
+                                       "/Zica-20230723-233395_RLs_bb.csv"))
+
+# use data from AUDITS (not RL files) for other explosive times
+# b/c RLs not run yet
+audit_rlfiles <- paste0(pingpath, c("/Zica-20230518-233391_Individual_anthro_pings.csv",
+                                    "/Zica-20230519-232950_Individual_anthro_pings.csv",
+                                    "/Zica-20240227-233396_Individual_anthro_pings.csv",
+                                    "/Zica-20240227-240128_Individual_anthro_pings.csv"))
+
+```
+
+# Tags to Process
+
+```{r}
+whale_list <- c(
+  # 'Zica-20190113-151361',
+  'Zica-20191012-144029',
+  'Zica-20191012-145101',
+  'Zica-20191111-94810',
+  'Zica-20191117-195993',
+  # 'Zica-20200106-195994', only 1 dive cycle
+  'Zica-20211112-94819',
+  'Zica-20211113-195993',
+  'Zica-20220112-195994',
+  'Zica-20230518-233391',
+  'Zica-20230519-232950', 
+  'Zica-20230723-233394', 
+  'Zica-20230723-233395', 
+  'Zica-20240227-233396', 
+  'Zica-20240227-240128'
+)
+```
+
+# RL data
+
+The code below gets measured RLs for all signals (MFAS, Echosounder, Explosives) for all tags included in `rlfiles` and `pingfiles`.
+
+```{r}
+fb_rls <- extract_rls(rl_file = rlfiles,
+                       signal = c('MFAS', 'Echosounder', 'Explosive'),
+                       save_output = FALSE) 
+```
+
+Add in BOOMIN explosives RLs
+
+```{r}
+boomin_rls <- list()
+
+for (f in c(1:length(boomin_rlfiles))){
+  these_rls <- read.csv(boomin_rlfiles[f])
+  boomin_rls[[f]] <- these_rls
+  rm(these_rls)
+}
+
+boomin_rls <- bind_rows(boomin_rls) |>
+  rename(TagID = depid,
+         sec_since_tagon = st,
+         duration = dur
+         )  |>
+  select(TagID, signal_type, st_UTC, sec_since_tagon,
+         duration, notes, SEL_dB, SEL_dur, SPL_pk, SPL_pkpk)
+```
+
+Add in times of explosives from audits
+
+```{r}
+audit_rls <- list()
+
+for (f in c(1:length(audit_rlfiles))){
+  these_rls <- read.csv(audit_rlfiles[f])
+  audit_rls[[f]] <- these_rls
+  rm(these_rls)
+}
+
+audit_rls <- bind_rows(audit_rls) |>
+  rename(TagID = tagid,
+         signal_type = Label,
+         st_UTC = UTC,
+         notes = Note,
+         duration = Duration) |>
+  # DON'T include MFA & Echo (those are in the other RL files)
+  # DON'T include POSS_EXP (only ones we are pretty sure)
+  filter(signal_type == "EXP") |>
+  select(TagID, signal_type, st_UTC, duration, notes)
+
+```
+
+
+```{r}
+all_rls <- bind_rows(fb_rls, boomin_rls, audit_rls) |>
+  mutate(signal_type = case_when(signal_type == "ECHO" ~ "Echosounder",
+                                 signal_type == "EXP" ~ "Explosive",
+                                 TRUE ~ signal_type)) 
+
+# add sec since tagon where it is missing (for the EXP sounds added from audits)
+all_rls <- all_rls |>
+  mutate(
+    st_UTC_orig = st_UTC,
+    st_UTC = if_else(TagID == "Zica-20220112-195994",
+                     lubridate::mdy_hms(st_UTC_orig),
+                     lubridate::ymd_hms(st_UTC_orig))) |>
+  mutate(st_UTC = if_else(is.na(st_UTC),
+                          lubridate::mdy_hms(st_UTC_orig),
+                          st_UTC)) |>
+  mutate(tagon_time = st_UTC - lubridate::as.period(sec_since_tagon))
+
+tagon_times <- all_rls |>
+  select(TagID, tagon_time) |>
+  group_by(TagID) |> 
+  drop_na(tagon_time) |>
+  summarise(tagon_time = first(tagon_time))
+
+all_rls <- left_join(all_rls |> select(-tagon_time), tagon_times, by = "TagID")
+         
+all_rls <- all_rls |>
+  mutate(calc_sec_since_tagon = as.numeric(st_UTC - tagon_time),
+         sec_since_tagon = ifelse(is.na(sec_since_tagon),
+                                  calc_sec_since_tagon,
+                                  sec_since_tagon)
+         ) |>
+  arrange(TagID, st_UTC)
+
+```
+
+*Note: warnings are expected, there are different date formats to be parsed one by one.*
+
+
+```{r, fig.height = 15, fig.width=7.5}
+# check RL extraction
+gf_histogram(~BB_RMS, data = all_rls) |>
+  gf_facet_wrap(~TagID, ncol = 1, scales = "free",
+                strip.position = 'top') |>
+  gf_lims(x = c(75, 150))
+
+gf_histogram(~duration, data = all_rls) |>
+  gf_facet_wrap(~TagID, ncol = 1, scales = "free",
+                strip.position = 'top') 
+```
+
+
+# Metadata related to RL Modeling
+
+This code searches the directories where RL modeling results are stored and compiles a table of modeled events with associated metadata (times, locations, tag IDs, name of file with RL model results, etc.)
+
+```{r}
+amf1 <- rl_model_meta_files[grepl('2021', rl_model_meta_files)]
+amf2 <- rl_model_meta_files[grepl('2022', rl_model_meta_files)]
+
+acous_model_meta1 <- readxl::read_xlsx(file.path(amf1, 'FB_ModelingDelivery_20210709_Unclass.xlsx')) |>
+  dplyr::mutate(ID = paste0(ID, 'A'),
+                model_dir = amf1)
+
+acous_model_meta2 <- readxl::read_xlsx(file.path(amf2, '2021_2022_Tracking_2022.07.20Delivery.xlsx')) |>
+  dplyr::mutate(ID = paste0(ID, 'B'),
+                model_dir = amf2,
+                ready = VBP # to match earlier file variable names
+                )
+
+acous_model_meta <- dplyr::bind_rows(acous_model_meta1,
+                                      acous_model_meta2) # |>
+  # # REMOVE all rows/model runs where there ARE NOT csv model output but rather a jpg showing what went wrong
+  # # eg. "too quiet" or "hit land" or "inside San Diego bay"
+  # # THIS ACTUALLY REMOVES A LOT like 1/3 of the model runs!
+  # dplyr::filter(tolower(ready) == "y")
+```
+
+# Combine fine-scale, coarse-scale, and measured/modeled RL data
+
+Loop over all whales in `whale_list` and put together:
+
+- Fine-scale data
+- Coarse-scale data
+- RLs (measured from acoustics)
+- RLs (from acoustic propagation modeling)
+
+```{r}
+# we'll end up with data at each scale, for all whales:
+all_whales_fine <- list()
+all_whales_coarse <- list()
+# PLUS combining scales
+# final result will be a data frame:
+all_whales_both_scales <- list()
+
+for (w in c(1:length(whale_list))){
+  tag <- whale_list[w]
+  this_tagon <- tagtools::load_nc(file.path(ncpath, paste0(whale_list[w], '-cal.nc')),
+                                    which_vars = list('info', 'depth'))$info$dephist_device_datetime_start |>
+    lubridate::dmy_hms()
+  
+  # read in fine scale data
+  #********************************************************
+  ffname <- file.path(ncpath, 'preproc-fine-coarse', paste0(tag, '-finescale.csv'))
+  this_fine <- readr::read_csv(ffname, 
+                           show_col_types = FALSE,
+                           na = c('', 'NA', 'NaN'))
+  win_dur <- median(diff(pull(this_fine, win_ctr_sec)))
+  this_fine <- this_fine |>
+    mutate(win_start = win_ctr_sec - win_dur/2,
+           win_end = win_ctr_sec + win_dur/2)
+  
+  # add measured RLs 
+  #********************************************************
+  these_rls <- all_rls |>
+    dplyr::filter(TagID == whale_list[w]) |>
+    rename_with(tolower)
+  
+  if (nrow(these_rls) > 0){
+    this_fine <- suppressWarnings( # there are a lot of warnings for cases where no ping duration, levels etc is non-NA
+      add_interval_rls(this_fine,
+                       ping_data = these_rls,
+                       start_x = win_start,
+                       end_x = win_end,
+                       start_ping = sec_since_tagon))
+    # prepend "fine_" to variable names for finescale RLs
+    this_fine <- dplyr::rename_with(this_fine, 
+                       function(x) paste('fine_', x, sep = ''),
+                       tidyselect::starts_with(c('mfa_', 'echosounder_', 'explosi')))
+  }
+  
+  if (!('fine_mfa_bb_rms_max' %in% names(this_fine))){
+    # if no pings detected on acoustic record fill in
+    this_fine[,c("fine_mfa_bb_rms_max",
+                 "fine_mfa_bb_rms_mean",
+                 "fine_mfa_bb_rms_median",
+                 "fine_mfa_bb_rms_min",
+                 "fine_mfa_ping_dur_max_sec",
+                 "fine_mfa_ping_dur_mean_sec",
+                 "fine_mfa_ping_dur_min_sec")] <- NA
+    this_fine <- this_fine |>
+      mutate(fine_mfa_n_pings = 0)
+  }
+  
+  # add modeled RLs -- from former dive_acoustic_summary
+  #********************************************************
+  these_model_meta <- acous_model_meta |>
+    dplyr::filter(TagID == whale_list[w])
+  
+  this_fine <- this_fine |>
+    dplyr::mutate(fine_model_fnames = NA,
+                  fine_model_ids = NA,
+                  fine_model_data_source = NA,
+                  fine_model_sonar_type = NA,
+                  fine_model_sonar_loc_source = NA,
+                  fine_model_source_whale_distance_km = NA,
+                  fine_model_source_whale_distance_min_km = NA,
+                  fine_model_source_whale_distance_max_km = NA,
+                  fine_model_source_whale_distance_median_km = NA,
+                  fine_model_rl_max_depth = NA,
+                  fine_model_rl_min_depth = NA,
+                  fine_model_rl_min = NA,
+                  fine_model_rl_max = NA,
+                  fine_model_rl_median = NA,
+                  fine_model_results_valid = NA,
+                  fine_model_error = NA) 
+  
+  this_fine <- as.data.frame(this_fine)
+  
+  for (rr in c(1:nrow(this_fine))) {
+    wst <- lubridate::seconds(this_fine |>
+                                dplyr::pull(win_start) |>
+                                dplyr::nth(rr)) + this_tagon
+    wet <- this_tagon +
+      lubridate::seconds(this_fine |>
+                           dplyr::pull(win_end) |>
+                           dplyr::nth(rr))
+    this_fine_meta <- these_model_meta |>
+      dplyr::filter(wst >= StartTime &
+                      wst < EndTime)
+    if (nrow(this_fine_meta) > 0) {
+      this_fine$fine_model_fnames[rr] <-
+        paste(
+            this_fine_meta$TagID,
+            '_',
+            this_fine_meta$SonarID,
+            '_',
+            this_fine_meta$Type,
+            '_',
+            stringr::str_pad(
+              as.character(parse_number(this_fine_meta$ID)),
+              width = 5,
+              side = 'left',
+              pad = '0'
+            ),
+            '.csv',
+            sep = ''
+          ) |> list()
+      this_fine$fine_model_ids[rr] <-
+        this_fine_meta |> dplyr::pull(ID) |> list()
+      this_fine$fine_model_sonar_loc_source[rr] = this_fine_meta |> dplyr::pull(SonarLocSource) |> unique() |> list()
+      this_fine$fine_model_source_whale_distance_km[rr] = this_fine_meta |> dplyr::pull(`Tag-SonarKm`) |> list()
+      this_fine$fine_model_source_whale_distance_min_km[rr] = this_fine_meta |> dplyr::pull(`Tag-SonarKm`) |> min(na.rm = TRUE)
+      this_fine$fine_model_source_whale_distance_max_km[rr] = this_fine_meta |> dplyr::pull(`Tag-SonarKm`) |> max(na.rm = TRUE)
+      this_fine$fine_model_source_whale_distance_median_km[rr] = this_fine_meta |> dplyr::pull(`Tag-SonarKm`) |> median(na.rm = TRUE)
+    } # end of if there are model results in this time frame
+    
+    this_model <- list()
+    if (nrow(this_fine_meta) > 0) {
+      for (mf in c(1:nrow(this_fine_meta))) {
+        this_file <-
+          file.path(
+            this_fine_meta |> dplyr::pull(model_dir) |> dplyr::first(),
+            this_fine[rr, ] |> dplyr::pull(fine_model_fnames) |> unlist() |> dplyr::nth(mf)
+          )
+        
+        ss <- dplyr::case_when(
+          stringr::str_detect(string = this_file, pattern = 'SPORTS') ~ 'SPORTS',
+          stringr::str_detect(string = this_file, pattern = 'ARCHIVE') ~ 'Archive',
+          TRUE ~ 'Other'
+        )
+        
+        sty <- stringr::str_split(this_file, '_', simplify = TRUE)
+        sty <- sty[length(sty) - 1]
+        
+        
+        if (!file.exists(this_file)) {
+          this_model[[mf]] <- tibble::tibble(
+            hyd_lat = NA,
+            hyd_lon = NA,
+            rl_depth_m = NA,
+            rl = 0,
+            fine_model_data_source = ss,
+            fine_model_sonar_type = sty,
+            fine_model_results_valid = 'no',
+            fine_model_error = this_fine_meta |> dplyr::pull(error) |> dplyr::nth(mf)
+          )
+        }else{
+          this_model[[mf]] <- readr::read_csv(this_file,
+                                              show_col_types = FALSE) |>
+            dplyr::rename(
+              hyd_lat = `Hyd Lat (deg)`,
+              hyd_lon = `Hyd Lon (deg)`,
+              rl_depth_m = `Received Depth (m)`,
+              rl = `Received Level (dB // 1uPa)`
+            ) |>
+            dplyr::mutate(
+              fine_model_data_source = ss,
+              fine_model_sonar_type = sty,
+              fine_model_results_valid = 'yes',
+              fine_model_error = this_fine_meta |> dplyr::pull(error) |> dplyr::nth(mf)
+            )
+        } # if acous model file exists
+      } # loop over mf
+      this_model <- dplyr::bind_rows(this_model)
+    }# end of if nrow(this_fine_meta > 0)
+    
+
+    if (length(this_model) > 0) { # if there was a model run at all
+      if (nrow(this_model |> filter(fine_model_results_valid == 'yes')) == 0){ # if there was no usable model output
+        this_fine$fine_model_data_source[rr] <- paste(dplyr::pull(this_model, fine_model_data_source) |> unique(), collapse = ', ')
+        this_fine$fine_model_sonar_type[rr] <- paste(dplyr::pull(this_model, fine_model_sonar_type) |> unique(), collapse = ', ')
+        this_fine$fine_model_results_valid[rr] <- paste(dplyr::pull(this_model, fine_model_results_valid) |> unique(), collapse = ', ')
+      }else{ # if there IS some usable model output
+        this_model <- this_model |>
+          filter(fine_model_results_valid == 'yes')
+        
+        this_fine$fine_model_data_source[rr] <- paste(dplyr::pull(this_model, fine_model_data_source) |> unique(), collapse = ', ')
+        this_fine$fine_model_sonar_type[rr] <- paste(dplyr::pull(this_model, fine_model_sonar_type) |> unique(), collapse = ', ')
+        this_fine$fine_model_results_valid[rr] <- paste(dplyr::pull(this_model, fine_model_results_valid) |> unique(), collapse = ', ')
+        
+        if ('rl_depth_m' %in% names(this_model)) {
+          this_model2 <- this_model |>
+            dplyr::filter(rl_depth_m <= (this_fine[rr, ] |> dplyr::pull(max_depth)))
+          
+          
+          if (this_fine[rr, ] |> dplyr::pull(med_depth) > max(pull(this_model, rl_depth_m))){
+            # if whale median depth is greater than max modeled depth, then use max modeled depth
+            zmatch_rls <- this_model |>
+              filter(rl_depth_m == max(pull(this_model, rl_depth_m))) |>
+              dplyr::pull(rl) 
+          }else{
+            # use modeled depth stratum that is the closest match to the whale's median depth in this interval
+            zmatch_ix <- which.min(abs(unique(pull(this_model, rl_depth_m)) - pull(this_fine[rr,], med_depth)))
+            zmatch_rls <- this_model |> 
+              filter(rl_depth_m == unique(pull(this_model, rl_depth_m))[zmatch_ix]) |>
+              pull(rl)
+          }
+          this_fine$fine_model_rl_max_depth[rr] <- max(zmatch_rls, na.rm = TRUE)
+          this_fine$fine_model_rl_min_depth[rr] <- min(zmatch_rls, na.rm = TRUE)
+          
+          suppressWarnings({
+            this_fine$fine_model_rl_min[rr] <-
+              this_model2 |> dplyr::pull(rl) |> min(na.rm = TRUE)
+            
+            this_fine$fine_model_rl_max[rr] <-
+              this_model2 |> dplyr::pull(rl) |> max(na.rm = TRUE)
+            
+            this_fine$fine_model_rl_median[rr] <-
+              this_model2 |> dplyr::pull(rl) |> median(na.rm = TRUE)
+          })
+        }# end of if if rl_depth_m variable is present
+      }# end of "if there are some results where ready == 'y'"
+      }# end of if nrow(this_model) > 0)
+} # end of loop over windows rr
+  
+  # make list-cols unlistified
+  this_fine <- this_fine |>
+    rowwise() |>
+    mutate(across(where(is.list), ~paste(sort(.x), collapse = ', '))) |>
+    ungroup() |>
+    # and make negative RLs 0 (NOT NA!)
+    dplyr::mutate(dplyr::across(starts_with('fine_model_rl'),
+                                ~ifelse(.x < 0, 0, .x)))
+  # other corrections to column variable types
+  # (some come out as logical if they are fully empty)
+  this_fine <- this_fine |>
+    mutate(std_head = as.numeric(std_head),
+           across(strokes_per_sec : nonfocal_clicks_present, as.numeric),
+           across(fine_model_fnames : fine_model_source_whale_distance_km, as.character),
+           across(fine_model_source_whale_distance_min_km : fine_model_rl_median, as.numeric))
+  
+  # garbage collection/free memory
+    gc()
+  
+  # read in coarse-scale data
+  #********************************************************
+  cfname <- file.path(ncpath, 'preproc-fine-coarse', paste0(tag, '-coarsescale.csv'))
+  this_coarse <- readr::read_csv(cfname, 
+                           show_col_types = FALSE,
+                           na = c('', 'NA', 'NaN'))
+  
+  # add measured RLs -- from make_hmm_dataset
+  #********************************************************
+  # Add RLs to dataset
+  suppressWarnings({
+  this_coarse <- add_interval_rls(this_coarse, 
+                                  ping_data = these_rls,
+                                  start_x = start_sec,
+                                  end_x = end_sec,
+                                  start_ping = sec_since_tagon)
+  }) # end suppressing warnings re: no non-missing arguments to min; returning Inf
+  
+  # if there is no acoustic data, fill in
+  if (!('mfa_n_pings' %in% names(this_coarse))){
+    this_coarse[,c("mfa_bb_rms_max",
+                 "mfa_bb_rms_mean",
+                 "mfa_bb_rms_median",
+                 "mfa_bb_rms_min",
+                 "mfa_ping_dur_max_sec",
+                 "mfa_ping_dur_mean_sec",
+                 "fine_mfa_ping_dur_min_sec")] <- NA
+    this_coarse <- this_coarse |>
+      mutate(mfa_n_pings = 0)
+  }
+  
+  these_rl_times <- these_rls |>
+    filter(str_detect(tolower(signal_type), pattern = 'mfa')) |>
+    pull(sec_since_tagon)
+  
+   echo_rl_times <- these_rls |>
+    filter(str_detect(tolower(signal_type), pattern = 'echo')) |>
+    pull(sec_since_tagon)
+   
+    explos_rl_times <- these_rls |>
+    filter(str_detect(tolower(signal_type), pattern = 'exp')) |>
+    pull(sec_since_tagon)
+  
+    this_coarse <- this_coarse |>
+      mutate(anthro_presence = purrr::map2_lgl(.x = start_sec,
+                                               .y = end_sec,
+                                               .f = function(x,y,rl_times = these_rls |> pull(sec_since_tagon)) 
+                                                 any((rl_times >= x & rl_times < y),
+                                                     na.rm = TRUE)),
+             echo_presence = purrr::map2_lgl(.x = start_sec,
+                                             .y = end_sec,
+                                             .f = function(x,y,rl_times = echo_rl_times) 
+                                               any((rl_times >= x & rl_times < y),
+                                                   na.rm = TRUE)),
+             explos_presence = purrr::map2_lgl(.x = start_sec,
+                                               .y = end_sec,
+                                               .f = function(x,y,rl_times = explos_rl_times) 
+                                                 any((rl_times >= x & rl_times < y),
+                                                     na.rm = TRUE)),
+             sonar_before_eoc = purrr::map2_lgl(.x = click_end_sec,
+                                                .y = start_sec,
+                                                .f = function(x,y,rl_times = these_rl_times) 
+                                                  any((rl_times < x & rl_times >= y),
+                                                      na.rm = TRUE)),
+             first_mfas_sec = purrr::map2_dbl(.x = start_sec,
+                                              .y = end_sec,
+                                              .f = function(x, y, rl_times = these_rl_times) 
+                                                min(rl_times[rl_times > x & rl_times < y])),
+             last_mfas_sec = purrr::map2_dbl(.x = start_sec,
+                                             .y = end_sec,
+                                             .f = function(x, y, rl_times = these_rl_times) 
+                                               max(rl_times[rl_times > x & rl_times < y])),
+             first_fd_mfas_sec = purrr::map2_dbl(.x = start_sec,
+                                              .y = start_sec + fd_dur_sec,
+                                              .f = function(x, y, rl_times = these_rl_times) 
+                                                min(rl_times[rl_times > x & rl_times < y])),
+             last_fd_mfas_sec = purrr::map2_dbl(.x = start_sec,
+                                             .y = start_sec + fd_dur_sec,
+                                             .f = function(x, y, rl_times = these_rl_times) 
+                                               max(rl_times[rl_times > x & rl_times < y]))) |>
+      mutate(first_mfas_sec = if_else(is.infinite(first_mfas_sec),
+                                      NA,
+                                      first_mfas_sec),
+             last_mfas_sec = if_else(is.infinite(last_mfas_sec),
+                                     NA,
+                                     last_mfas_sec))
+    rm(these_rl_times)
+  
+  # add in MFAS proportion.
+  # issue: what value do we put if there is NO MFAS?
+  # do we want 0 to mean no exposure at all?
+  # one variable for proportion *of foraging dive* and also one for proportion of dive cycle?
+  # think about how to name this thing...
+  this_coarse <- this_coarse |>
+    rowwise() |>
+    mutate(
+      # this will be 0 if no MFAS, 1 if MFAS starts at start of foraging dive
+      prop_fd_after_mfas = 1 - min(c(1, (first_mfas_sec - start_sec) / fd_dur_sec), na.rm = TRUE),
+      # 1 if no MFAS, 1 if MFAS ends at the very start of foraging dive
+      prop_fd_after_last_mfas = max(c(0, min(c(1, 1 - (last_mfas_sec - start_sec) / fd_dur_sec), na.rm = TRUE))) ,
+      prop_fd_mfas_overlap = (last_fd_mfas_sec - first_fd_mfas_sec) / fd_dur_sec,
+      prop_dc_mfas_overlap = (last_mfas_sec - first_mfas_sec) / dur_sec) |>
+    ungroup() |>
+    mutate(prop_fd_mfas_overlap = if_else(is.na(prop_fd_mfas_overlap),
+                   0,
+                   prop_fd_mfas_overlap),
+           prop_dc_mfas_overlap = if_else(is.na(prop_dc_mfas_overlap),
+                   0,
+                   prop_dc_mfas_overlap))
+  
+  # add modeled RLs 
+  #********************************************************
+  #*
+  this_coarse <- this_coarse |>
+    dplyr::mutate(coarse_model_fnames = NA,
+                  coarse_model_ids = NA,
+                  coarse_model_data_source = NA,
+                  coarse_model_sonar_type = NA,
+                  coarse_model_sonar_loc_source = NA,
+                  coarse_model_source_whale_distance_km = NA,
+                  coarse_model_source_whale_distance_min_km = NA,
+                  coarse_model_source_whale_distance_max_km = NA,
+                  coarse_model_source_whale_distance_median_km = NA,
+                  coarse_model_rl_min = NA,
+                  coarse_model_rl_max = NA,
+                  coarse_model_rl_median = NA,
+                  coarse_model_results_valid = NA,
+                  coarse_model_error = NA) 
+  
+  for (dc in c(1:nrow(this_coarse))) {
+    dcst <- lubridate::seconds(this_coarse |>
+                                 dplyr::pull(start_sec) |>
+                                 dplyr::nth(dc)) + this_tagon
+    dcet <- this_tagon +
+      lubridate::seconds(this_coarse |>
+                           dplyr::pull(end_sec) |>
+                           dplyr::nth(dc))
+    this_coarse_meta <- these_model_meta |>
+      dplyr::filter((StartTime  >= dcst & StartTime < dcet) | # sonar starts during this dive cycle
+                      (EndTime >= dcst & EndTime < dcet) | # sonar ends during this dive cycle
+                      (StartTime <= dcst & EndTime >= dcet) # sonar spans this whole dive cycle
+      )
+    if (nrow(this_coarse_meta) > 0) {
+      this_coarse$coarse_model_fnames[dc] <-
+        paste(
+          this_coarse_meta$TagID,
+          '_',
+          this_coarse_meta$SonarID,
+          '_',
+          this_coarse_meta$Type,
+          '_',
+          stringr::str_pad(
+            as.character(parse_number(this_coarse_meta$ID)),
+            width = 5,
+            side = 'left',
+            pad = '0'
+          ),
+          '.csv',
+          sep = ''
+        ) |> list()
+      this_coarse$coarse_model_ids[dc] <-
+        this_coarse_meta |> dplyr::pull(ID) |> list()
+      this_coarse$coarse_model_sonar_loc_source[dc] = this_coarse_meta |> dplyr::pull(SonarLocSource) |> unique() |> list()
+      this_coarse$coarse_model_source_whale_distance_km[dc] = this_coarse_meta |> dplyr::pull(`Tag-SonarKm`) |> list()
+      this_coarse$coarse_model_source_whale_distance_min_km[dc] = this_coarse_meta |> dplyr::pull(`Tag-SonarKm`) |> min(na.rm = TRUE)
+      this_coarse$coarse_model_source_whale_distance_max_km[dc] = this_coarse_meta |> dplyr::pull(`Tag-SonarKm`) |> max(na.rm = TRUE)
+      this_coarse$coarse_model_source_whale_distance_median_km[dc] = this_coarse_meta |> dplyr::pull(`Tag-SonarKm`) |> median(na.rm = TRUE)
+    } # end of if there are model results in this time frame
+    
+    this_model <- list()
+    if (nrow(this_coarse_meta) > 0) {
+      for (mf in c(1:nrow(this_coarse_meta))) {
+        this_file <-
+          file.path(
+            this_coarse_meta |> dplyr::pull(model_dir) |> dplyr::first(),
+            this_coarse[dc, ] |> dplyr::pull(coarse_model_fnames) |> unlist() |> dplyr::nth(mf)
+          )
+        
+        ss <- dplyr::case_when(
+          stringr::str_detect(string = this_file, pattern = 'SPORTS') ~ 'SPORTS',
+          stringr::str_detect(string = this_file, pattern = 'ARCHIVE') ~ 'Archive',
+          TRUE ~ 'Other'
+        )
+        
+        sty <- stringr::str_split(this_file, '_', simplify = TRUE)
+        sty <- sty[length(sty) - 1]
+        
+        
+        if (!file.exists(this_file)) {
+          this_model[[mf]] <- tibble::tibble(
+            hyd_lat = NA,
+            hyd_lon = NA,
+            rl_depth_m = NA,
+            rl = 0,
+            coarse_model_data_source = ss,
+            coarse_model_sonar_type = sty,
+            coarse_model_results_valid = 'no',
+            coarse_model_error = this_coarse_meta |> dplyr::pull(error) |> dplyr::nth(mf)
+          )
+        }else{
+          this_model[[mf]] <- readr::read_csv(this_file,
+                                              show_col_types = FALSE) |>
+            dplyr::rename(
+              hyd_lat = `Hyd Lat (deg)`,
+              hyd_lon = `Hyd Lon (deg)`,
+              rl_depth_m = `Received Depth (m)`,
+              rl = `Received Level (dB // 1uPa)`
+            ) |>
+            dplyr::mutate(
+              coarse_model_data_source = ss,
+              coarse_model_sonar_type = sty,
+              coarse_model_results_valid = 'yes',
+              coarse_model_error = this_coarse_meta |> dplyr::pull(error) |> dplyr::nth(mf)
+            )
+        } # if acous model file exists
+      } # loop over mf
+      this_model <- dplyr::bind_rows(this_model)
+    }# end of if nrow(this_coarse_meta > 0)
+    
+    
+    if (length(this_model) > 0) { # if there was a model run at all
+      if (nrow(this_model |> filter(coarse_model_results_valid == 'yes')) == 0){ # if there was no usable model output
+        this_coarse$coarse_model_data_source[dc] <- paste(dplyr::pull(this_model, coarse_model_data_source) |> unique(), collapse = ', ')
+        this_coarse$coarse_model_sonar_type[dc] <- paste(dplyr::pull(this_model, coarse_model_sonar_type) |> unique(), collapse = ', ')
+        this_coarse$coarse_model_results_valid[dc] <- paste(dplyr::pull(this_model, coarse_model_results_valid) |> unique(), collapse = ', ')
+      }else{ # if there IS some usable model output
+        this_model <- this_model |>
+          filter(coarse_model_results_valid == 'yes')
+        
+        this_coarse$coarse_model_data_source[dc] <- paste(dplyr::pull(this_model, coarse_model_data_source) |> unique(), collapse = ', ')
+        this_coarse$coarse_model_sonar_type[dc] <- paste(dplyr::pull(this_model, coarse_model_sonar_type) |> unique(), collapse = ', ')
+        
+        if ('rl_depth_m' %in% names(this_model)) {
+          this_model2 <- this_model |>
+            dplyr::filter(rl_depth_m <= (this_coarse[dc, ] |> dplyr::pull(max_depth)))
+          
+          suppressWarnings({
+            this_coarse$coarse_model_rl_min[dc] <-
+              this_model2 |> dplyr::pull(rl) |> min(na.rm = TRUE)
+            
+            this_coarse$coarse_model_rl_max[dc] <-
+              this_model2 |> dplyr::pull(rl) |> max(na.rm = TRUE)
+            
+            this_coarse$coarse_model_rl_median[dc] <-
+              this_model2 |> dplyr::pull(rl) |> median(na.rm = TRUE)
+          })
+        }# end of if if rl_depth_m variable is present
+      }# end of "if there are some results where ready == 'y'"
+    }# end of if nrow(this_model) > 0)
+  } # end of loop over windows dc
+  
+  # make list-cols unlistified
+  this_coarse <- this_coarse |>
+    rowwise() |>
+    mutate(across(where(is.list), ~paste(sort(.x), collapse = ', '))) |>
+    ungroup() |>
+    # and make negative RLs 0 (NOT NA!)
+    dplyr::mutate(dplyr::across(starts_with('coarse_model_rl'),
+                                ~ifelse(.x < 0, 0, .x)),
+                  # manual breath count can be missing, but cannot be 0
+                  breath_count_manual = ifelse(breath_count_manual == 0, NA, breath_count_manual))
+  # other corrections to column variable types
+  # (some come out as logical if they are fully empty)
+  this_coarse <- this_coarse |>
+    mutate(across(coarse_model_fnames : coarse_model_source_whale_distance_km, as.character),
+           across(coarse_model_source_whale_distance_min_km : coarse_model_rl_median, as.numeric))
+  
+  # garbage collection/free memory
+  gc()
+
+  #* # add gps position data
+  #********************************************************
+  source('add_gps_data.R')
+  this_coarse <- add_gps_data(nc_fname = file.path(ncpath, paste0(tag, '-cal.nc')),
+                              divecycle_data = this_coarse)
+  
+  # add bathymetry data
+  # variables: bathy (mean), bathy_slope, bathy_aspect + all within 2.5km radius
+  # using LAST loc from dive cycle (where they go not where they begin)
+  #********************************************************
+  this_coarse <- add_bathy(this_coarse,
+                           lat_var = lat_final,
+                           lon_var = lon_final,
+                           z_radius = 2.5,
+                           bathy_path = bathypath)
+    
+  
+  # combine fine and coarse scales
+  #********************************************************
+  this_fine <- this_fine |>
+    mutate(start_time_sec = win_start,
+           dc_start_window_mid = win_ctr_sec,
+           hierarchy_level = '2',
+           # indicator of whether the measured RLs have a corresponding distance value @ 5-minute scale
+           fine_RL_AND_distance = ifelse(fine_mfa_n_pings > 0 &
+                                           !is.na(fine_model_rl_max_depth) &
+                                           !is.na(fine_model_source_whale_distance_min_km),
+                                         TRUE,
+                                         FALSE))
+  
+  this_coarse <- this_coarse |>
+    mutate(start_time_sec = start_sec,
+           dc_start_window_mid = start_sec,
+           whale_ID = tag,
+           dive_cycle_num = c(1:nrow(this_coarse)),
+           hierarchy_level = '1')
+  
+  this_coarse2 <- this_coarse |>
+    mutate(hierarchy_level = '2i')
+  
+  start_data <- min(pull(this_coarse, start_sec))
+  end_data <- max(
+    c(
+      max(pull(this_coarse, end_sec), na.rm = TRUE),
+      max(pull(this_coarse, start_sec) + pull(this_coarse, fd_dur_sec), na.rm = TRUE)
+    )
+  )
+  
+  this_fine <- filter(this_fine, start_time_sec >= start_data & start_time_sec <= end_data)
+  
+  suppressWarnings({
+    # many warnings due to "no non-missing entries to min() or max() returning Inf"
+  this_both_scales <- bind_rows(this_coarse, this_coarse2, this_fine) |>
+    arrange(whale_ID, dc_start_window_mid) |>
+    fill(dive_cycle_num, .direction = "down") |>
+    mutate(hierarchy_level = ordered(hierarchy_level, levels = c('1', '2i', '2')),
+           # add UTC time stamps too in addition to seconds since start
+           start_time_UTC = lubridate::seconds(start_time_sec) + this_tagon) |>
+    group_by(whale_ID, dive_cycle_num) |>
+    mutate(
+      # min of all distances for which model_results_valid = YES
+      coarse_min_km_from_valid_fine = 
+        min(fine_model_source_whale_distance_min_km[!is.na(fine_mfa_bb_rms_max)], na.rm = TRUE),
+      # min of all distances for which model_results_valid = YES **AND** measured RLs exist
+      coarse_min_km_from_fine_RL_AND_distance = 
+             min(fine_model_source_whale_distance_min_km[fine_RL_AND_distance], na.rm = TRUE),
+      coarse_mfa_bb_rms_grand_mean = mean(fine_mfa_bb_rms_mean, na.rm = TRUE),
+      coarse_mfa_bb_rms_grand_median = median(fine_mfa_bb_rms_median, na.rm = TRUE),
+      coarse_mfa_bb_rms_grand_min = min(fine_mfa_bb_rms_median, na.rm = TRUE),
+      coarse_mfa_bb_rms_grand_max = max(fine_mfa_bb_rms_max, na.rm = TRUE),
+      coarse_mfa_bb_rms_grand_max_from_fine_RL_AND_distance = 
+        max(fine_mfa_bb_rms_max[fine_RL_AND_distance], na.rm = TRUE),
+      coarse_model_rl_grand_max_depth = max(fine_model_rl_max_depth, na.rm = TRUE),
+      coarse_model_rl_grand_min_depth = min(fine_model_rl_max_depth, na.rm = TRUE),
+      coarse_model_rl_grand_max_depth_from_fine_RL_AND_distance = 
+        max(fine_model_rl_max_depth[fine_RL_AND_distance], na.rm = TRUE),
+      # indicator of whether dive cycles with detected MFA (from acoustic record) also
+      # have a corresponding distance value @ dive-cycle scale
+      coarse_RL_AND_distance = ifelse(!is.na(coarse_min_km_from_fine_RL_AND_distance) &
+                                        !is.infinite(coarse_min_km_from_fine_RL_AND_distance) &
+                                        mfa_n_pings > 0,
+                                      TRUE,
+                                      FALSE)
+           ) |>
+    ungroup() |>
+    # make Inf and -Inf into NAs
+    mutate(across(where(~ is.double(.x) & !is.POSIXct(.x)), ~na_if(., Inf)), 
+           across(where(~ is.double(.x) & !is.POSIXct(.x)), ~na_if(., -Inf)))
+  })
+  
+  # save results
+  #********************************************************
+  all_whales_fine[[w]] <- this_fine
+  all_whales_coarse[[w]] <- this_coarse
+  # note that the "both scales" dataset is in momentuHierHMM format
+  # level 1 rows are duplicated with the labels "2i"
+  # 5-minute fine-scale obs are assigned to the dive cycle that they *start* in
+  all_whales_both_scales[[w]] <- this_both_scales
+  
+  # cleanup
+  #********************************************************
+  rm(this_fine, this_coarse, this_both_scales, these_model_meta, these_rls, this_fine_meta)
+  gc()
+  
+} # end of loop over whales w
+
+# combine all tags (unlist/bind_rows())
+all_whales_fine <- bind_rows(all_whales_fine)
+all_whales_coarse <- bind_rows(all_whales_coarse)
+all_whales_both_scales <- bind_rows(all_whales_both_scales)
+
+# save result in RDS file
+saveRDS(all_whales_fine, file = file.path(ncpath, 'all_whales_fine25.RDS'))
+saveRDS(all_whales_coarse, file = file.path(ncpath, 'all_whales_coarse25.RDS'))
+saveRDS(all_whales_both_scales, file = file.path(ncpath, 'all_whales_both_scales25.RDS'))
+
+```

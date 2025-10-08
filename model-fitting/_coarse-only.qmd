@@ -1,0 +1,234 @@
+
+```{r}
+# only run this code if repeating is FALSE
+orig_eval <- knitr::opts_chunk$get("eval")
+knitr::opts_chunk$set(eval = ifelse(repeating, FALSE, TRUE),
+                      warning = FALSE, message = FALSE)
+options(warn = -1)
+```
+
+
+## Load & Prepare Data
+
+```{r, data-in}
+hmm_data <- hhmm_data |>
+  as.data.frame() |>
+  filter(level == "1") |>
+  prepData(coordNames = NULL,
+           covNames = c('mfa_bb_rms_max_scale',
+                        'fine_mfa_bb_rms_max_67_scale',
+                        'mfa_csel',
+                        'fine_mfa_csel',
+                        'sonar_before_eoc'))
+```
+
+
+```{r, warning = FALSE}
+# keep this many dive cycles before 1st mfas and after the last
+dc_buffer <- c(1,3)
+
+trimmed_hmm_data <- hmm_data |>
+  group_by(whale_ID) |>
+  mutate(first_mfas = match(1, mfa_n_pings > 0),
+         last_mfas = if_else(
+           sum(mfa_n_pings == 0) == n(),
+           n(),
+           max(which(mfa_n_pings > 0)))
+  )
+
+trimmed_hmm_data <- trimmed_hmm_data |>
+  filter(is.na(first_mfas) | 
+           (dive_cycle_num >= (first_mfas - dc_buffer[1]) & dive_cycle_num <= (last_mfas + dc_buffer[2]))) |>
+  ungroup()
+
+
+trimmed_hmm_data <- trimmed_hmm_data |>
+  prepData(coordNames = NULL,
+           covNames = c('mfa_bb_rms_max_scale',
+                        'fine_mfa_bb_rms_max_67_scale',
+                        'mfa_csel',
+                        'fine_mfa_csel',
+                        'sonar_before_eoc'))
+```
+
+## Starting Parameter Values
+
+```{r, message = FALSE, eval = FALSE, include = FALSE}
+library(mosaic)
+gf_boxplot(dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data)
+gf_point(dur_hours ~ mfa_bb_rms_max_scale, data = trimmed_hmm_data, alpha = 0.2, color = ~whale_ID)
+median(dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+mean(dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+IQR(dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+sd(dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+
+gf_boxplot(longest_nf_dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data)
+gf_point(longest_nf_dur_hours ~ mfa_bb_rms_max_scale, data = trimmed_hmm_data, alpha = 0.2, color = ~whale_ID)
+median(longest_nf_dur_hours ~ factor(sonar_before_eoc), 
+       data = trimmed_hmm_data, 
+       na.rm = TRUE)
+mean(longest_nf_dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+IQR(longest_nf_dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+sd(longest_nf_dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+
+gf_boxplot(fd_dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data)
+gf_point(fd_dur_hours ~ mfa_bb_rms_max_scale, data = trimmed_hmm_data, alpha = 0.2)
+median(fd_dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+mean(fd_dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+IQR(fd_dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+sd(fd_dur_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+
+gf_boxplot(surf_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data)
+gf_point(surf_hours ~ mfa_bb_rms_max_scale, data = trimmed_hmm_data, alpha = 0.2) |>
+  gf_hline(yintercept = median(~surf_hours, data = trimmed_hmm_data |> filter(sonar_before_eoc == 0), na.rm = TRUE))
+median(surf_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+mean(surf_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+IQR(surf_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+sd(surf_hours ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+
+gf_boxplot(bathy ~ factor(sonar_before_eoc), data = trimmed_hmm_data)
+gf_point(bathy ~ mfa_bb_rms_max_scale, data = trimmed_hmm_data, alpha = 0.2) |>
+  gf_hline(yintercept = median(~bathy, data = trimmed_hmm_data |> filter(sonar_before_eoc == 0), na.rm = TRUE))
+median(bathy ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+mean(bathy ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+IQR(bathy ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+sd(bathy ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+
+gf_boxplot(click_dur_mins ~ factor(sonar_before_eoc), data = trimmed_hmm_data)
+gf_point(click_dur_mins ~ mfa_bb_rms_max_scale, data = trimmed_hmm_data, alpha = 0.2) |>
+  gf_hline(yintercept = mean(~click_dur_mins, data = trimmed_hmm_data |> filter(sonar_before_eoc == 0), na.rm = TRUE))
+median(click_dur_mins ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+mean(click_dur_mins ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+IQR(click_dur_mins ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+sd(click_dur_mins ~ factor(sonar_before_eoc), data = trimmed_hmm_data, na.rm = TRUE)
+```
+
+```{r, coarse-start-vals}
+dur.mu0 = c(2.7, 4)
+dur.sigma0 = c(1, 6)
+
+nf.dur.mu0 = c(0.43, 0.8)
+nf.dur.sigma0 = c(0.1, 0.5)
+
+fd.dur.mu0 = c(1.12, 1)
+fd.dur.sigma0 = c(0.19, 0.4)
+
+step.mu0 = c(1.7, 1.5)
+step.sigma0 = c(0.97, 1.2)
+
+surf.mu0 = c(0.29, 0.35)
+surf.sigma0 = c(0.21, 0.3)
+
+ckdur.mu0 = c(33, 30)
+ckdur.sigma0 = c(8, 10.4)
+```
+
+```{r, construct-par0}
+Par00 <- list(dur_hours = c(dur.mu0, dur.sigma0),
+             fd_dur_hours = c(fd.dur.mu0, fd.dur.sigma0),
+             longest_nf_dur_hours = c(nf.dur.mu0, nf.dur.sigma0),
+             surf_hours = c(surf.mu0, surf.sigma0),
+             step = c(step.mu0, step.sigma0),
+             click_dur_mins = c(ckdur.mu0, ckdur.sigma0)
+             )
+```
+
+## Model Structure & Metadata
+
+```{r, data-stream-distributions}
+state_dep_dists <- list(dur_hours="gamma",
+                        fd_dur_hours="gamma",
+                        longest_nf_dur_hours = "gamma",
+                        step = "gamma",
+                        surf_hours="gamma",
+                        click_dur_mins="gamma"
+                      )
+```
+
+```{r rl-model-list}
+rl_model_meta <- 
+  data.frame(
+    model_name = 
+      c('no_sonar',
+        'rl_coarse',
+        'rl_eoc_coarse',
+        'rl_eoc_int_coarse',
+        'sel_coarse',
+        'sel_eoc_coarse',
+        'sel_eoc_int_coarse'),
+    coarse_formula = 
+      c("~1",
+        "~mfa_bb_rms_max_scale",
+        "~mfa_bb_rms_max_scale + sonar_before_eoc",
+        "~mfa_bb_rms_max_scale * sonar_before_eoc",
+        "~mfa_csel_scale",
+        "~mfa_csel_scale + sonar_before_eoc",
+        "~mfa_csel_scale * sonar_before_eoc"
+      )
+  )
+
+rl_model_meta <- rl_model_meta |>
+  mutate(model_file = paste0("../data/refitted-models/coarse-only/", model_name, '.RDS')) |>
+  as.data.frame()
+
+```
+
+## Model Fitting
+
+
+```{r, fit-models-round1, results = 'hide'}
+n_fit_cycles <- 10
+fitted_models <- list()
+for (c in c(1:n_fit_cycles)){
+  these_fitted_models <- list()
+  for(rep in c(1:2)){
+    for (m in c(1:nrow(rl_model_meta))){
+      message(paste('Round', c, 'of', n_fit_cycles, '- Fitting model', m, 'of', nrow(rl_model_meta),
+                    '. Model name:', rl_model_meta[m, "model_name"]))
+      if (m == 1 & rep == 1){
+        Par0 <- Par00
+        beta0 <- NULL
+        delta0 <- c(0.99,0.005)
+      }else{
+        Par0 <- getPar0(these_fitted_models[[which.max(unlist(lapply(these_fitted_models, getLL)))]],
+                        formula = as.formula(rl_model_meta[m, 'coarse_formula']))
+        beta0 <- Par0$beta
+        delta0 <- Par0$delta
+        Par0 <- Par0$Par
+      }
+      # fit model
+      this_file <- rl_model_meta[m, 'model_file']
+      this_fit <- try(suppressWarnings(fitHMM(hmm_data,
+                             nbStates = 2,
+                             dist = state_dep_dists,
+                             formula = as.formula(rl_model_meta[m, 'coarse_formula']),
+                             Par0 = Par0,
+                             beta0 = beta0,
+                             delta0 = delta0,
+                             optMethod = "nlm",
+                             retryFits = 100,
+                             retrySD = 250
+      )),
+      silent = TRUE
+      )
+      if ("momentuHMM" %in% class(this_fit)){
+        these_fitted_models[[m]] <- this_fit
+        if (c == 1){ 
+          fitted_models[[m]] <- these_fitted_models[[m]]
+          saveRDS(fitted_models[[m]], this_file)
+        }
+        if (c > 1 & getLL(these_fitted_models[[m]]) > getLL(fitted_models[[m]])){
+          fitted_models[[m]] <- these_fitted_models[[m]]
+          saveRDS(fitted_models[[m]], this_file)  
+        } # end of "if new fit is better"
+      } # end of "if new fit is a momentuHMM object (not an error)
+    } # end of fitting the mth model
+  } # end of loop over models
+} # end fitting cycles
+```
+
+```{r}
+knitr::opts_chunk$set(eval = orig_eval)
+options(warn = 0)
+```
+
